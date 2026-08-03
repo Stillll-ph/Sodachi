@@ -930,9 +930,15 @@ class FieldSlider(QWidget):
         *,
         slider: bool = True,
         name_hidden: bool = False,
+        also_fit: Sequence[str] = (),
     ) -> None:
         super().__init__(parent)
         self._name = name
+        # Number texts the recess must fit besides its own range's — the same
+        # field's extremes in the other display unit. Sized for both up front
+        # so a unit flip rebuilds the row at the width it already had, and
+        # nothing in the window moves.
+        self._also_fit = tuple(str(text) for text in also_fit)
         # Hidden, not absent: a companion widget may already say the name —
         # the BOTTOM mode chip carries "BOTTOM" itself — and painting it twice
         # would spend the row's width on an echo. Lookup by name still works.
@@ -1161,13 +1167,11 @@ class FieldSlider(QWidget):
         return QFontMetricsF(mono_font(7, caps=True)).horizontalAdvance(text) + 4.0
 
     def _field_w(self) -> float:
-        """The recess hugs the widest number the range can produce."""
+        """The recess hugs the widest number the range can produce — in any
+        unit the field is built for, so the width survives a unit flip."""
         metrics = QFontMetricsF(mono_font(9))
-        widest = max(
-            metrics.horizontalAdvance(self._format(self._maximum)),
-            metrics.horizontalAdvance(self._format(self._minimum)),
-        )
-        return widest + 14.0
+        texts = [self._format(self._maximum), self._format(self._minimum), *self._also_fit]
+        return max(metrics.horizontalAdvance(text) for text in texts) + 14.0
 
     def _field_rect(self) -> QRectF:
         rect = QRectF(self.rect())
@@ -1181,8 +1185,9 @@ class FieldSlider(QWidget):
         shortened at that moment would move under the cursor that is driving
         the very solve that produced the arrow.
         """
-        widest = f"→{self._format(self._maximum)}"
-        return QFontMetricsF(mono_font(7, caps=True)).horizontalAdvance(widest) + 4.0
+        metrics = QFontMetricsF(mono_font(7, caps=True))
+        texts = [self._format(self._maximum), *self._also_fit]
+        return max(metrics.horizontalAdvance(f"→{text}") for text in texts) + 4.0
 
     def _slider_rect(self) -> QRectF:
         """SLIDER_W of rail, anchored to the right edge; slack becomes the

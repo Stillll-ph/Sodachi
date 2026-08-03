@@ -337,10 +337,11 @@ class FieldBank(QWidget):
         companion_left: bool = False,
         caption: str | None = None,
         name_hidden: bool = False,
+        also_fit: Sequence[str] = (),
     ) -> FieldSlider:
         field = FieldSlider(
             name, minimum, maximum, value, suffix, decimals, self,
-            slider=slider, name_hidden=name_hidden,
+            slider=slider, name_hidden=name_hidden, also_fit=also_fit,
         )
         field.valueChanged.connect(lambda v, f=field: self.valueChanged.emit(f.name(), v))
         self._fields.append(field)
@@ -1169,8 +1170,17 @@ class MainWindow(QMainWindow):
         self._mat_fields: list[tuple[FieldSlider, str]] = []
         self._mat_captions: list[CaptionNote] = []
         self._mat_caption_by_name: dict[str, CaptionNote] = {}
-        for name, dotted, low, high in MAT_FIELDS[units]:
-            field = FieldSlider(name, low, high, low, units, decimals)
+        # Sized for the other unit's extremes as well — see the physical
+        # bank — so the whole rail keeps one width across a unit flip.
+        other = "mm" if units == "in" else "in"
+        other_dec = INCH_DECIMALS if other == "in" else 1
+        for (name, dotted, low, high), (_o, _od, olo, ohi) in zip(
+            MAT_FIELDS[units], MAT_FIELDS[other]
+        ):
+            field = FieldSlider(
+                name, low, high, low, units, decimals,
+                also_fit=(f"{olo:.{other_dec}f}", f"{ohi:.{other_dec}f}"),
+            )
             field.valueChanged.connect(lambda v, d=dotted: self._on_mat_field(d, v))
             self._mat_fields.append((field, dotted))
         self.fs_mat_overlap = self._mat_fields[0][0]
@@ -1300,7 +1310,15 @@ class MainWindow(QMainWindow):
     def _make_physical_bank(self, units: str) -> FieldBank:
         bank = FieldBank()
         for name, _field, low_mm, high_mm, suffix, decimals in PHYSICAL_FIELDS:
+            also_fit: tuple[str, ...] = ()
             if name in LENGTH_FIELDS:
+                # The recess is sized for the other unit's extremes too, so
+                # the row the flip rebuilds is the width of the row it
+                # replaces and the window holds still.
+                other = "mm" if units == "in" else "in"
+                other_dec = INCH_DECIMALS if other == "in" else decimals
+                olo, ohi = _display_range(low_mm, high_mm, other)
+                also_fit = (f"{olo:.{other_dec}f}", f"{ohi:.{other_dec}f}")
                 low, high = _display_range(low_mm, high_mm, units)
                 suffix = units
                 decimals = INCH_DECIMALS if units == "in" else decimals
@@ -1322,6 +1340,7 @@ class MainWindow(QMainWindow):
                     companion_left=True,
                     caption=BOTTOM_FIELD_CAPTIONS["fixed"],
                     name_hidden=True,
+                    also_fit=also_fit,
                 )
             elif name == "DPI":
                 # Typed only: real DPI values are a handful of printer-native
@@ -1336,6 +1355,7 @@ class MainWindow(QMainWindow):
                 bank.addField(
                     name, low, high, low, suffix, decimals,
                     caption=FIELD_CAPTIONS.get(name),
+                    also_fit=also_fit,
                 )
         return bank
 
