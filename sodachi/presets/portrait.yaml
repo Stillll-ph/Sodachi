@@ -1,0 +1,16 @@
+# Sodachi preset — a tall 4:5 frame.
+#
+# Presets are starting points. Copy this file, change the numbers, and pass the
+# copy's path wherever a preset name is accepted.
+
+name: portrait
+description: >-
+  A border that lands on 4:5, the usual tall frame. Wider images gain padding
+  above and below until they stand up; nothing is cropped.
+
+aspect_min: 0.8           # w/h, inclusive — 4:5 exactly
+aspect_max: 0.8
+
+max_px: 4096              # longest edge of the finished sheet
+min_width_px: 600         # narrower sheets are grown to this width
+border_fraction: 0.05     # of the image's short edge

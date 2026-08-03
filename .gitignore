@@ -1,0 +1,14 @@
+# Build artifacts the packaging step and an editable install produce.
+# The repository itself ships none of these; this exists so a local build
+# never lands in a commit by accident.
+dist/
+build/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# The test suite is maintained locally and run before every packaged build,
+# but is not part of the published tree.
+tests/

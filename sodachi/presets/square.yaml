@@ -1,0 +1,16 @@
+# Sodachi preset — a square frame.
+#
+# Presets are starting points. Copy this file, change the numbers, and pass the
+# copy's path wherever a preset name is accepted.
+
+name: square
+description: >-
+  A border that lands on an exact 1:1 square. Anything wider or taller is
+  padded on the short axis until it is square; nothing is cropped.
+
+aspect_min: 1.0           # w/h, inclusive — the window is a single ratio
+aspect_max: 1.0
+
+max_px: 4096              # longest edge of the finished sheet
+min_width_px: 600         # narrower sheets are grown to this width
+border_fraction: 0.05     # of the image's short edge

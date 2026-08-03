@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sodachi"
+version = "0.1.0"
+description = "Layout for images: borders, diptychs, and true-scale mat cutting guides."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+dependencies = [
+    "pydantic>=2.6",
+    "ruamel.yaml>=0.18",
+    "pyvips>=2.2",
+    "reportlab>=4.0",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+binary = ["pyvips[binary]>=2.2"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+sodachi-gui = "sodachi.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["sodachi*"]
+
+[tool.setuptools.package-data]
+sodachi = ["presets/*.yaml", "gui/icon.ico"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:sodachi.*"]

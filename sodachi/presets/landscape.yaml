@@ -1,0 +1,18 @@
+# Sodachi preset — a permissive landscape window.
+#
+# Presets are starting points. Copy this file, change the numbers, and pass the
+# copy's path wherever a preset name is accepted.
+
+name: landscape
+description: >-
+  A wide window rather than a single ratio: anything from square up to 2:1
+  keeps its own shape and only gains its border. The common landscape frames
+  — 4:3, 3:2, 16:9 — all fall inside it, so they are left alone. Squarer than
+  1:1 is padded at the sides, wider than 2:1 above and below.
+
+aspect_min: 1.0           # w/h, inclusive — squarer than this is padded wider
+aspect_max: 2.0           # w/h, inclusive — wider than this is padded taller
+
+max_px: 4096              # longest edge of the finished sheet
+min_width_px: 600         # narrower sheets are grown to this width
+border_fraction: 0.05     # of the image's short edge
