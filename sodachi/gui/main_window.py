@@ -124,6 +124,18 @@ PHYSICAL_FIELDS = (
 
 LENGTH_FIELDS = frozenset({"TOP", "SIDES", "BOTTOM", "GUTTER"})
 
+RESOLVING_FIELDS = frozenset({"TOP", "SIDES", "BOTTOM"})
+"""The margins the solve can honestly move past their typed value; only
+these rows ever show the resolved arrow, so only they hold room for it."""
+
+FIT_CAUSE = "image proportions"
+"""The fit cause names its culprit outright: the frames' own shapes are
+what left the box's spare room, not any setting."""
+
+RESOLVED_CAUSE_RESERVE = FIT_CAUSE
+"""The widest cause a resolved value can carry — the room is reserved up
+front so a cause landing mid-drag never reflows the row."""
+
 BOTTOM_MODES = ("fixed", "optical", "center")
 """The bottom margin's three ways of being stated. FIXED leads because the
 neutral spec pins it, and the chip's off-default accent should mark a chosen
@@ -338,10 +350,12 @@ class FieldBank(QWidget):
         caption: str | None = None,
         name_hidden: bool = False,
         also_fit: Sequence[str] = (),
+        cause_reserve: str = "",
     ) -> FieldSlider:
         field = FieldSlider(
             name, minimum, maximum, value, suffix, decimals, self,
             slider=slider, name_hidden=name_hidden, also_fit=also_fit,
+            cause_reserve=cause_reserve,
         )
         field.valueChanged.connect(lambda v, f=field: self.valueChanged.emit(f.name(), v))
         self._fields.append(field)
@@ -1341,6 +1355,7 @@ class MainWindow(QMainWindow):
                     caption=BOTTOM_FIELD_CAPTIONS["fixed"],
                     name_hidden=True,
                     also_fit=also_fit,
+                    cause_reserve=RESOLVED_CAUSE_RESERVE,
                 )
             elif name == "DPI":
                 # Typed only: real DPI values are a handful of printer-native
@@ -1356,6 +1371,9 @@ class MainWindow(QMainWindow):
                     name, low, high, low, suffix, decimals,
                     caption=FIELD_CAPTIONS.get(name),
                     also_fit=also_fit,
+                    cause_reserve=(
+                        RESOLVED_CAUSE_RESERVE if name in RESOLVING_FIELDS else ""
+                    ),
                 )
         return bank
 
@@ -2177,18 +2195,29 @@ class MainWindow(QMainWindow):
         self.stack_pane.set_layout_result(layout)
         # The solved margins, restated beside what was asked for: a side
         # margin is a minimum, so the rail says 3.00 and, when the sheet says
-        # 3.25, the row shows the arrow the moment it happens.
+        # 3.25, the row shows the arrow the moment it happens — and names
+        # what moved it. SIDES only ever widens by centring the content;
+        # TOP and BOTTOM absorb the height the frames' shapes leave spare
+        # ("fit"), except that a derived bottom's weighting hands TOP its
+        # share by RATIO or by an even split.
+        rule = self.engine.spec.margins.bottom_mm
+        top_cause = (
+            {"optical": "ratio", "center": "centred"}.get(rule, FIT_CAUSE)
+            if isinstance(rule, str)
+            else FIT_CAUSE
+        )
         resolved = {
-            "TOP": None if layout is None else layout.margins.top_mm,
-            "SIDES": None if layout is None else layout.margins.left_mm,
-            "BOTTOM": None if layout is None else layout.margins.bottom_mm,
+            "TOP": (None if layout is None else layout.margins.top_mm, top_cause),
+            "SIDES": (None if layout is None else layout.margins.left_mm, "centred"),
+            "BOTTOM": (None if layout is None else layout.margins.bottom_mm, FIT_CAUSE),
         }
-        for name, value_mm in resolved.items():
+        for name, (value_mm, cause) in resolved.items():
             field = self._phys_bank.field(name)
             if field is not None and not field.isReadOnly():
                 field.set_resolved(
                     None if value_mm is None
-                    else _display_length(value_mm, self._unit_mode)
+                    else _display_length(value_mm, self._unit_mode),
+                    cause,
                 )
         # Every spec edit ends here via resolve, so a live overlap or reveal
         # drag repaints the board overlay in the same breath as the layout —

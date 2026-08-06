@@ -931,6 +931,7 @@ class FieldSlider(QWidget):
         slider: bool = True,
         name_hidden: bool = False,
         also_fit: Sequence[str] = (),
+        cause_reserve: str = "",
     ) -> None:
         super().__init__(parent)
         self._name = name
@@ -939,6 +940,11 @@ class FieldSlider(QWidget):
         # so a unit flip rebuilds the row at the width it already had, and
         # nothing in the window moves.
         self._also_fit = tuple(str(text) for text in also_fit)
+        # The widest cause word this row's resolved value can carry ("fit",
+        # "centred", "ratio"). Reserved up front like the arrow itself, so a
+        # cause landing mid-drag never reflows the row.
+        self._cause_reserve = str(cause_reserve)
+        self._resolved_cause: str | None = None
         # Hidden, not absent: a companion widget may already say the name —
         # the BOTTOM mode chip carries "BOTTOM" itself — and painting it twice
         # would spend the row's width on an echo. Lookup by name still works.
@@ -989,19 +995,22 @@ class FieldSlider(QWidget):
         """The field itself, exposed for focus chains and tests."""
         return self._edit
 
-    def set_resolved(self, value: float | None) -> None:
+    def set_resolved(self, value: float | None, cause: str | None = None) -> None:
         """The value the solver actually used, when it differs from the field.
 
         A side margin is a minimum, so 3.00 in the field can honestly become
         3.25 on the sheet. Painting the resolved number beside the suffix says
         so at the moment it happens instead of leaving the preview to disagree
-        quietly with the rail.
+        quietly with the rail. ``cause`` names what moved it — the mechanism
+        or field responsible — painted soft after the number.
         """
         rounded = None if value is None else round(float(value), self._decimals)
         if rounded == self._value:
             rounded = None
-        if rounded != self._resolved:
+        shown_cause = cause if rounded is not None else None
+        if rounded != self._resolved or shown_cause != self._resolved_cause:
             self._resolved = rounded
+            self._resolved_cause = shown_cause
             self.update()
 
     def set_allowed(self, low: float | None, high: float | None) -> None:
@@ -1164,7 +1173,20 @@ class FieldSlider(QWidget):
         text = self._resolved_text()
         if not text:
             return 0.0
-        return QFontMetricsF(mono_font(7, caps=True)).horizontalAdvance(text) + 4.0
+        # 8pt plain rather than the 7pt letter-spaced micro style: at 7pt the
+        # arrow glyph collapses into a plus sign, and the number this states
+        # is the one actually cut, so it has earned the ink.
+        return QFontMetricsF(mono_font(8)).horizontalAdvance(text) + 4.0
+
+    def _cause_w(self) -> float:
+        if not self._resolved_cause:
+            return 0.0
+        # Plain 6.5pt, not the letter-spaced micro style: the cause is a
+        # whole phrase, and letter-spacing a phrase costs the preview the
+        # width the words were meant to save.
+        return (
+            QFontMetricsF(mono_font(6.5)).horizontalAdvance(self._resolved_cause) + 4.0
+        )
 
     def _field_w(self) -> float:
         """The recess hugs the widest number the range can produce — in any
@@ -1183,11 +1205,18 @@ class FieldSlider(QWidget):
 
         Reserved permanently because the arrow lands mid-drag: a rail that
         shortened at that moment would move under the cursor that is driving
-        the very solve that produced the arrow.
+        the very solve that produced the arrow. The cause word's room is held
+        the same way, sized by the widest cause this row can name.
         """
-        metrics = QFontMetricsF(mono_font(7, caps=True))
+        metrics = QFontMetricsF(mono_font(8))
         texts = [self._format(self._maximum), *self._also_fit]
-        return max(metrics.horizontalAdvance(f"→{text}") for text in texts) + 4.0
+        width = max(metrics.horizontalAdvance(f"→{text}") for text in texts) + 4.0
+        if self._cause_reserve:
+            width += (
+                QFontMetricsF(mono_font(6.5)).horizontalAdvance(self._cause_reserve)
+                + 4.0
+            )
+        return width
 
     def _slider_rect(self) -> QRectF:
         """SLIDER_W of rail, anchored to the right edge; slack becomes the
@@ -1330,13 +1359,28 @@ class FieldSlider(QWidget):
             )
             x += self._suffix_w()
         if self._resolved is not None:
-            draw_micro_label(
-                p,
+            # Painted plain at 8pt, not micro-caps: see `_resolved_w`.
+            p.save()
+            p.setFont(mono_font(8))
+            p.setPen(PALETTE.accent)
+            p.drawText(
                 QRectF(x, rect.top(), self._resolved_w(), rect.height()),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                 self._resolved_text(),
-                colour=PALETTE.accent,
-                align=Qt.AlignmentFlag.AlignLeft,
             )
+            p.restore()
+            if self._resolved_cause:
+                p.save()
+                p.setFont(mono_font(6.5))
+                p.setPen(PALETTE.ink_soft)
+                p.drawText(
+                    QRectF(
+                        x + self._resolved_w(), rect.top(), self._cause_w(), rect.height()
+                    ),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    self._resolved_cause,
+                )
+                p.restore()
 
         if self._has_slider:
             rail = self._rail()
