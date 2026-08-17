@@ -55,7 +55,13 @@ from PySide6.QtWidgets import (
 
 from sodachi import __version__
 from sodachi.core.solver import ALIGN_MODES, SIZE_MATCH_MODES
-from sodachi.core.units import inch_to_mm, mm_to_inch, mm_to_px, px_to_mm
+from sodachi.core.units import (
+    NOMINAL_SCREEN_DPI,
+    inch_to_mm,
+    mm_to_inch,
+    mm_to_px,
+    px_to_mm,
+)
 # Safe at module scope: app.py reaches the other way only inside `main`.
 from sodachi.gui.app import apply_palette_to
 from sodachi.gui.axon import DEFAULT_EXPLODE, StackPane
@@ -66,7 +72,7 @@ from sodachi.gui.dialogs import (
     PrintFromOpeningDialog,
     StandardSizeDialog,
 )
-from sodachi.gui.models import Job, SodachiEngine, vips_status
+from sodachi.gui.models import OUTPUT_SUFFIX, Job, SodachiEngine, vips_status
 from sodachi.gui.preview import PreviewPane
 from sodachi.gui.theme import (
     PALETTE,
@@ -238,6 +244,73 @@ FIELD_CAPTIONS = {
     "WIDTH": "the finished image's width in pixels",
     "HEIGHT": "the finished image's height in pixels",
 }
+CANVAS_MODES = ("exact", "fixed")
+"""Which of the canvas and the image is the fixed one on SCREEN.
+
+EXACT leads because it is the honest default for screen work: pixels are
+the artifact there, so the canvas follows the file rather than the file
+being resampled to fill a canvas inherited from a sheet of paper."""
+
+CANVAS_CAPTIONS = {
+    "exact": "canvas follows the file; borders exact",
+    "fixed": "canvas as typed; the image is scaled to fit",
+}
+
+FORMAT_MODES = ("png", "jpg", "tiff")
+"""What SCREEN writes. PNG leads: it is lossless, and a bordered image is
+usually headed somewhere that will recompress it anyway, so starting from
+an untouched file is the kinder default. TIFF is here because a spec can
+still ask for one and a chip that could not show it would be lying."""
+
+FORMAT_SPEC_VALUE = {"png": "png", "jpg": "jpeg", "tiff": "tiff"}
+"""Chip face to spec vocabulary. The spec says 'jpeg' because that is the
+format's name; people say JPG, so the chip does too."""
+
+FORMAT_CHIP_VALUE = {v: k for k, v in FORMAT_SPEC_VALUE.items()}
+
+FORMAT_SUFFIX = OUTPUT_SUFFIX
+"""Spec format to the extension written — the engine's table, so the save
+dialog and the batch namer cannot drift apart."""
+
+FORMAT_BY_SUFFIX = {
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".tif": "tiff",
+    ".tiff": "tiff",
+}
+"""What a typed extension means. Both spellings of JPEG and TIFF, because
+the dialog lets the name be typed and either is a real thing to type."""
+
+FORMAT_FILTER = {
+    "png": "PNG image (*.png)",
+    "jpeg": "JPEG image (*.jpg *.jpeg)",
+    "tiff": "TIFF image (*.tif *.tiff)",
+}
+
+JPEG_MAX_QUALITY = 100
+"""JPEG is offered at maximum quality and nowhere else on the rail: a
+quality slider is a knob nobody wants to have got wrong after the fact,
+and the file this program writes is a finished piece, not a proof."""
+
+FORMAT_CAPTIONS = {
+    "png": "lossless; larger file",
+    "jpg": f"smaller file, quality {JPEG_MAX_QUALITY}",
+    "tiff": "archival; the screen render is 8-bit either way",
+}
+
+EXACT_CANVAS_CLEAR = (
+    "sheet.width_mm",
+    "sheet.height_mm",
+    "sheet.width_in",
+    "sheet.height_in",
+    "sheet.standard",
+    "sheet.dpi",
+)
+"""An exact canvas is stated in pixels, so every other way of saying the
+sheet's size goes in the same edit — including the DPI, which a pixel sheet
+is not allowed to choose."""
+
 PIXEL_MARGIN_CAPTIONS = {
     "TOP": "the border above the image, in pixels",
     "SIDES": "the border at each side, in pixels",
@@ -636,6 +709,9 @@ class MainWindow(QMainWindow):
         self._unit_mode = self.engine.spec.display_units
         self._vips_ok, vips_message = vips_status()
         self._scheme = "standard"
+        # Guards the exact-canvas derivation against its own spec edit
+        # arriving back as a sync and asking it to derive again.
+        self._deriving_canvas = False
         # The stock warm-white pair the spec ships with; boards showing it (or
         # the pair a previous palette derived) follow the palette, boards the
         # user has recoloured stay theirs.
@@ -1084,6 +1160,16 @@ class MainWindow(QMainWindow):
         pixel_column = QVBoxLayout(pixel_page)
         pixel_column.setContentsMargins(0, 0, 0, 0)
         pixel_column.setSpacing(8)
+        # Which of the canvas and the image is the fixed one. EXACT derives
+        # the canvas from the file plus the borders, so the counts typed are
+        # the counts written and the image is never resampled; FIXED is the
+        # older behaviour, for posting into a slot of a stated size.
+        self.tg_canvas = ToggleChip("CANVAS", CANVAS_MODES, horizontal=True)
+        self.tg_canvas.valueChanged.connect(self._on_canvas_mode)
+        pixel_column.addWidget(self.tg_canvas)
+        self.cap_canvas = CaptionNote(CANVAS_CAPTIONS["exact"])
+        self.cap_canvas.setVisible(False)
+        pixel_column.addWidget(self.cap_canvas)
         pixel_column.addWidget(self._pixel_bank)
         self.padding_note = PaddingNote("padding: add images to measure the fit")
         pixel_column.addWidget(self.padding_note)
@@ -1122,6 +1208,16 @@ class MainWindow(QMainWindow):
         # On SCREEN the button is the act itself: press, get the bordered
         # image — no menu, because the tab has exactly one output. The BATCH
         # chip beside it widens the act to every queued file.
+        # What the press writes. Above the button rather than beside it: the
+        # file type is a decision made once and then forgotten, while BATCH
+        # is part of the act itself.
+        self.tg_format = ToggleChip("FORMAT", FORMAT_MODES, horizontal=True)
+        self.tg_format.valueChanged.connect(self._on_format_chip)
+        self.tg_format.setVisible(False)
+        column.addWidget(self.tg_format)
+        self.cap_format = CaptionNote(FORMAT_CAPTIONS["png"])
+        self.cap_format.setVisible(False)
+        column.addWidget(self.cap_format)
         self.screen_export_row = QWidget()
         screen_row = QHBoxLayout(self.screen_export_row)
         screen_row.setContentsMargins(0, 0, 0, 0)
@@ -1627,14 +1723,24 @@ class MainWindow(QMainWindow):
         target = TAB_TARGETS[index]
         if self.engine.spec.target == target:
             self._sync_from_spec()
+            if index == PIXEL_TAB:
+                self._apply_exact_canvas()
             return
 
         changes: dict[str, Any] = {}
         clear = ["layout.align", "margins.bottom_mm"]
         if target == "screen":
             changes["mat.enabled"] = False
+            # A TIFF on screen is merely a large file, not a wrong one — the
+            # model says so in a note — but nobody posts one, so the screen
+            # spec derives with the format the tab is actually for.
+            changes["output.format"] = "png"
         if not self.engine.set_target(target, changes=changes, clear=clear):
             self._sync_from_spec()  # puts the tab back on the target in force
+        elif target == "screen":
+            # The screen spec arrives with the print sheet's size; EXACT
+            # rebuilds it around the file the moment the tab opens.
+            self._apply_exact_canvas()
 
     # ------------------------------------------------------------------ view
 
@@ -1708,6 +1814,7 @@ class MainWindow(QMainWindow):
             (self.tg_match, spec.layout.size_match),
             (self.tg_align, spec.layout.align),
             (self.tg_units, spec.display_units),
+            (self.tg_format, FORMAT_CHIP_VALUE[spec.output.format]),
         ):
             blocked = chip.blockSignals(True)
             chip.setValue(value)
@@ -1779,6 +1886,16 @@ class MainWindow(QMainWindow):
         # button with the print vocabulary belongs to PHYSICAL.
         self.btn_export.setVisible(not on_pixels)
         self.screen_export_row.setVisible(on_pixels)
+        # The canvas chip is screen equipment: a print sheet is a board you
+        # own, and nothing about it follows the file.
+        self.tg_canvas.setVisible(on_pixels)
+        self.cap_canvas.setVisible(beginner and on_pixels)
+        # PHYSICAL writes guides, cut paths and a table, each with a format
+        # of its own chosen in its own dialog; only SCREEN writes an image.
+        self.tg_format.setVisible(on_pixels)
+        self.cap_format.setVisible(beginner and on_pixels)
+        self.cap_format.setText(FORMAT_CAPTIONS[self.tg_format.value()])
+        self._sync_canvas_mode()
         self._sync_batch_dest()
         self.cap_export.setText(
             "writes the bordered image — BATCH: the whole queue, to EXPORT TO"
@@ -2336,7 +2453,10 @@ class MainWindow(QMainWindow):
         self.art.setImage(self._thumbnails.get(0))
 
         self._refresh_count_line()
-        self._sync_from_spec()
+        # A new file is a new canvas while EXACT holds: the borders stay as
+        # typed and the sheet is rebuilt around whatever arrived.
+        if not self._apply_exact_canvas():
+            self._sync_from_spec()
 
     def _refresh_count_line(self) -> None:
         """A sheet is one output: one solved composition, however many frames
@@ -2447,7 +2567,12 @@ class MainWindow(QMainWindow):
     def _on_pixel_field(self, name: str, value: float) -> None:
         px = int(round(value))
         dpi = self.engine.spec.sheet.dpi
+        # Under EXACT the canvas grows to hold whatever border is asked for,
+        # so there is no ceiling to clamp against and the whole edit — border
+        # and canvas together — goes in one pass.
         if name == "BORDER":
+            if self._apply_exact_canvas(top_px=px, sides_px=px, bottom_px=px):
+                return
             # The headline case: one count, all three margins. Clamped first,
             # so a border bigger than the sheet becomes the biggest border the
             # sheet can hold instead of a refusal.
@@ -2461,15 +2586,133 @@ class MainWindow(QMainWindow):
                 }
             )
         elif name == "TOP":
-            self._set_pixel_margin("margins.top_mm", px)
+            if not self._apply_exact_canvas(top_px=px):
+                self._set_pixel_margin("margins.top_mm", px)
         elif name == "SIDES":
-            self._set_pixel_margin("margins.sides_mm", px)
+            if not self._apply_exact_canvas(sides_px=px):
+                self._set_pixel_margin("margins.sides_mm", px)
         elif name == "BOTTOM":
-            self._set_pixel_margin("margins.bottom_mm", px)
+            if not self._apply_exact_canvas(bottom_px=px):
+                self._set_pixel_margin("margins.bottom_mm", px)
         elif name == "WIDTH":
             self._set_sheet_axis_px("width", px)
         elif name == "HEIGHT":
             self._set_sheet_axis_px("height", px)
+
+    # ------------------------------------------------------------ exact canvas
+
+    def _exact_source(self):
+        """The one probed file an exact canvas is built around, or None.
+
+        Exact borders need a single image per canvas: once frames share a
+        sheet, MATCH decides their sizes relative to each other and no
+        arrangement of them is at native pixels, so the mode would have
+        nothing honest to derive.
+        """
+        if self.engine.spec.target != "screen":
+            return None
+        job = self.engine.current_job()
+        if job is None or len(job.items) != 1:
+            return None
+        item = job.items[0]
+        if item.phantom or not item.probed:
+            return None
+        if not item.width_px or not item.height_px:
+            return None
+        return item
+
+    def _border_px(self) -> tuple[int, int, int]:
+        """(top, sides, bottom) as the pixel counts currently on the rail."""
+        spec = self.engine.spec
+        dpi = spec.sheet.dpi
+        return (
+            int(round(mm_to_px(spec.margins.top_mm, dpi))),
+            int(round(mm_to_px(spec.margins.sides_mm, dpi))),
+            int(round(mm_to_px(self._bottom_mm(spec), dpi))),
+        )
+
+    def _apply_exact_canvas(
+        self,
+        top_px: int | None = None,
+        sides_px: int | None = None,
+        bottom_px: int | None = None,
+    ) -> bool:
+        """Size the canvas to the file plus its borders. True if it applied.
+
+        The counts typed become the counts written. The sheet is stated in
+        pixels, so the millimetre round trip closes on them exactly and the
+        slot lands at the file's native size — which the renderer reads as
+        its cue to skip the resampler altogether. The bottom margin is pinned
+        to a number in the same edit: a derived bottom would even out an
+        asymmetric pair and quietly undo the exactness.
+
+        One edit, not two, because a border set before the canvas grew to
+        hold it is a spec that momentarily does not solve.
+        """
+        if self._deriving_canvas or self.tg_canvas.value() != "exact":
+            return False
+        item = self._exact_source()
+        if item is None:
+            return False
+        current = self._border_px()
+        top = current[0] if top_px is None else max(0, top_px)
+        sides = current[1] if sides_px is None else max(0, sides_px)
+        bottom = current[2] if bottom_px is None else max(0, bottom_px)
+
+        self._deriving_canvas = True
+        try:
+            self._set_many(
+                {
+                    "sheet.width_px": int(item.width_px) + 2 * sides,
+                    "sheet.height_px": int(item.height_px) + top + bottom,
+                    "margins.top_mm": px_to_mm(top, NOMINAL_SCREEN_DPI),
+                    "margins.sides_mm": px_to_mm(sides, NOMINAL_SCREEN_DPI),
+                    "margins.bottom_mm": px_to_mm(bottom, NOMINAL_SCREEN_DPI),
+                },
+                clear=EXACT_CANVAS_CLEAR,
+            )
+        finally:
+            self._deriving_canvas = False
+        return True
+
+    def _on_format_chip(self, face: str) -> None:
+        """Pick what the press writes.
+
+        JPEG arrives at maximum quality without asking, and drags an
+        explicit 16-bit depth down with it: the format cannot hold more than
+        eight bits, and the spec refuses the pair rather than writing a file
+        that quietly is not what its depth claims.
+        """
+        self._touch_notice(self.tg_format)
+        spec_format = FORMAT_SPEC_VALUE[face]
+        changes: dict[str, Any] = {"output.format": spec_format}
+        if spec_format == "jpeg":
+            changes["output.quality"] = JPEG_MAX_QUALITY
+            if self.engine.spec.output.bit_depth == 16:
+                changes["output.bit_depth"] = 8
+        self._set_many(changes)
+
+    def _on_canvas_mode(self, value: str) -> None:
+        self._touch_notice(self.tg_canvas)
+        self._sync_canvas_mode()
+        if value == "exact":
+            self._apply_exact_canvas()
+
+    def _sync_canvas_mode(self) -> None:
+        """WIDTH and HEIGHT report rather than take input while EXACT holds."""
+        exact = self.tg_canvas.value() == "exact"
+        for name in ("WIDTH", "HEIGHT"):
+            field = self._pixel_bank.field(name)
+            if field is None:
+                continue
+            field.setReadOnly(exact)
+            field.set_inert(
+                "derived: the canvas follows the file and its borders while "
+                "CANVAS is EXACT"
+                if exact
+                else None
+            )
+        self.cap_canvas.setText(CANVAS_CAPTIONS[self.tg_canvas.value()])
 
     def _max_border_px(self) -> int:
         """The largest uniform border the sheet can hold, one pixel spare."""
@@ -2568,10 +2811,40 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- export
 
     def _export_image(self) -> None:
-        suffix = {"tiff": ".tif", "png": ".png", "jpeg": ".jpg"}[self.engine.spec.output.format]
-        path, _ = QFileDialog.getSaveFileName(self, "Export image", f"sheet{suffix}")
-        if path:
-            self.engine.render_async(path)
+        """Write the bordered image, in the format the FORMAT chip states.
+
+        The dialog offers every format rather than only the chosen one, so a
+        person who came to the dialog to change their mind can: whichever
+        filter they leave with becomes the spec's, and the chip follows. The
+        extension is appended when they typed a bare name, because a file
+        called "roll12" is not one the engine can write.
+        """
+        spec_format = self.engine.spec.output.format
+        chosen_filter = FORMAT_FILTER[spec_format]
+        filters = [chosen_filter] + [
+            f for key, f in FORMAT_FILTER.items() if key != spec_format
+        ]
+        path, used = QFileDialog.getSaveFileName(
+            self,
+            "Export image",
+            f"sheet{FORMAT_SUFFIX[spec_format]}",
+            ";;".join(filters),
+            chosen_filter,
+        )
+        if not path:
+            return
+        picked = next(
+            (key for key, f in FORMAT_FILTER.items() if f == used), spec_format
+        )
+        suffix = Path(path).suffix.lower()
+        # A typed extension outranks the filter: it is the more deliberate of
+        # the two statements about what this file is.
+        picked = FORMAT_BY_SUFFIX.get(suffix, picked)
+        if not suffix:
+            path = f"{path}{FORMAT_SUFFIX[picked]}"
+        if picked != spec_format:
+            self._on_format_chip(FORMAT_CHIP_VALUE[picked])
+        self.engine.render_async(path)
 
     def _batch_dir(self) -> str | None:
         stored = QSettings().value(BATCH_DIR_SETTING)

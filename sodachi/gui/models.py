@@ -48,6 +48,11 @@ with a border; a 128px thumbnail stretched across 900px said otherwise."""
 CUT_FORMATS = (".dxf", ".svg", ".csv")
 """Output extensions :meth:`SodachiEngine.cut_async` recognises."""
 
+OUTPUT_SUFFIX = {"tiff": ".tif", "png": ".png", "jpeg": ".jpg"}
+"""``output.format`` to the extension written. Lives here rather than in the
+window because the batch namer needs it too, and two copies of a table like
+this drift the moment a format is added."""
+
 DISPLAY_UNITS = ("mm", "in")
 
 DEFAULT_PRESET = "landscape"
@@ -860,7 +865,7 @@ class SodachiEngine(QObject):
             self.problem.emit("add some images first")
             return False
 
-        suffix = {"tiff": ".tif", "png": ".png", "jpeg": ".jpg"}[self._spec.output.format]
+        suffix = OUTPUT_SUFFIX[self._spec.output.format]
         tasks: list[RenderTask] = []
         skipped = 0
         used: set[Path] = set()

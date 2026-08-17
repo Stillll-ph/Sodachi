@@ -38,7 +38,13 @@ if TYPE_CHECKING:
 
 
 SCREEN_MAX_PX = 4096
-"""Long-edge cap for ``target: screen``. Larger uploads are downscaled anyway."""
+"""The long edge the bundled presets plan towards for ``target: screen``.
+
+Advisory, not enforced: :func:`render` writes a screen sheet at whatever
+size it was composed at. A platform ceiling is something the fit planner is
+asked about — see :mod:`sodachi.fit` — not something applied behind the
+user's back to a canvas they stated in pixels.
+"""
 
 ASPECT_TOLERANCE = 0.005
 """Slot-versus-image aspect disagreement worth telling the user about."""
@@ -170,20 +176,18 @@ def render(
         _report(progress, "flattening to sRGB", 0.84)
         canvas = to_srgb8(canvas)
         final_depth = 8
-        long_px = max(canvas.width, canvas.height)
-        if long_px > SCREEN_MAX_PX:
-            canvas = canvas.resize(SCREEN_MAX_PX / long_px, kernel="lanczos3")
-            warnings.append(
-                f"sheet long edge was {long_px}px; downscaled to "
-                f"{max(canvas.width, canvas.height)}px because screen targets are "
-                f"capped at {SCREEN_MAX_PX}px"
-            )
+        # No long-edge cap. A screen sheet is written at the size it was
+        # composed at, because the pixel counts on the rail are the whole
+        # point of the tab: a canvas quietly rescaled on the way out turns a
+        # 300px border into a 267px one, which is exactly the surprise this
+        # side of the program exists to avoid. Platform ceilings are the fit
+        # planner's business, and it is asked rather than applied.
     else:
         out_profile = _resolve_output_profile(spec, profile)
         canvas = attach_profile(canvas, out_profile)
 
     # Resolution is measured off the finished sheet rather than taken from the
-    # spec, because the screen cap above may have changed it.
+    # spec, so it stays true of the pixels actually written.
     px_per_mm = canvas.width / layout.sheet.width_mm
     canvas = canvas.copy(xres=px_per_mm, yres=px_per_mm)
 
@@ -355,10 +359,23 @@ def _resize_into_working(
     ``size="force"`` is what guarantees the composited sheet matches the solved
     layout: the distortion it can introduce is bounded by pixel rounding, well
     under 0.1%, and anything larger has already been reported as an aspect
-    disagreement by the caller.
+    disagreement by the caller. A slot already the size of its source skips
+    the resampler entirely — see below.
     """
     intent = spec.color.intent
     linear = spec.color.resize_in_linear_light
+
+    # A slot the size of its source has nothing to resample, and running the
+    # kernel anyway would soften an image that was already exactly right.
+    # This is what makes an exact canvas exact: the pixels the user chose
+    # reach the file untouched. The header read is lazy, so asking costs
+    # nothing when the answer is no.
+    try:
+        native = vips.Image.new_from_file(str(path)).autorot()
+    except vips.Error as exc:
+        raise RenderError(f"cannot read {path}: {exc}") from exc
+    if (native.width, native.height) == (w_px, h_px):
+        return to_working(native, profile, intent=intent, depth=depth)
 
     if depth == 8:
         # thumbnail gives shrink-on-load and its own linear-light mode, but in
@@ -372,10 +389,7 @@ def _resize_into_working(
             raise RenderError(f"cannot resample {path}: {exc}") from exc
         return to_working(image, profile, intent=intent, depth=8)
 
-    try:
-        image = vips.Image.new_from_file(str(path)).autorot()
-    except vips.Error as exc:
-        raise RenderError(f"cannot read {path}: {exc}") from exc
+    image = native
 
     if linear:
         # thumbnail's linear mode written out longhand: resample in the profile

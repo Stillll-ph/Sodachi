@@ -44,13 +44,30 @@ def mm_to_px_exact(mm: float, dpi: float) -> float:
     return mm * dpi / MM_PER_INCH
 
 
+PX_EPSILON = 1e-6
+"""How close to a whole pixel counts as being on it.
+
+A length that is a whole number of pixels by construction does not always
+say so in binary: 30px converted to millimetres and back lands on
+229.99999999999997 rather than 230, and flooring that loses a pixel. The
+tolerance is far below any real sub-pixel geometry and far above the drift
+a couple of conversions introduce.
+"""
+
+
 def mm_to_px_floor(mm: float, dpi: float) -> int:
     """Millimetres to pixels, rounded down.
 
     Slot origins use this so that two slots sharing a gutter can never round
-    towards each other and overlap by a pixel.
+    towards each other and overlap by a pixel. A value within
+    :data:`PX_EPSILON` of a whole pixel is taken to be on it, so a round trip
+    through millimetres does not quietly shorten a slot that was exact.
     """
-    return int(math.floor(mm * dpi / MM_PER_INCH))
+    px = mm * dpi / MM_PER_INCH
+    nearest = math.floor(px + 0.5)
+    if abs(px - nearest) <= PX_EPSILON:
+        return int(nearest)
+    return int(math.floor(px))
 
 
 def px_to_mm(px: float, dpi: float) -> float:
