@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sodachi"
-version = "0.1.1"
+version = "0.1.2"
 description = "Layout for images: borders, diptychs, and true-scale mat cutting guides."
 readme = "README.md"
 requires-python = ">=3.11"

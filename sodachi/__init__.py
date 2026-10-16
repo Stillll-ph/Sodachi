@@ -9,6 +9,6 @@ renderer; points exist only inside the mat-guide renderer. See ``core/units``
 for the two conversion functions that are allowed to cross that line.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = ["__version__"]
