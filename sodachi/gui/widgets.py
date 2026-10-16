@@ -1726,6 +1726,19 @@ class Marquee(QWidget):
     def _overflows(self) -> bool:
         return self._text_width() > self.width() - 8
 
+    def reveal_ms(self) -> int:
+        """How long the scroll takes to bring the hidden tail into view.
+
+        Zero when the text fits. The marquee moves one pixel per tick, so
+        the time is the overhang — text past the clip, plus the gap before
+        the text comes round again — in ticks. The owner of a timed notice
+        asks this so a long complaint is not taken down half-read.
+        """
+        if not self._overflows():
+            return 0
+        hidden = self._text_width() - (self.width() - 8) + self.GAP_PX
+        return int(math.ceil(hidden)) * self.INTERVAL_MS
+
     def _sync_timer(self) -> None:
         if self.isVisible() and self._overflows():
             if not self._timer.isActive():

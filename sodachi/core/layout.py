@@ -21,8 +21,9 @@ class Sheet:
     requested_px: tuple[int, int] | None = None
     """Set when the spec gave pixel dimensions.
 
-    The raster renderer asserts it lands on exactly these numbers, which is how
-    the millimetre round trip in §1's corollary stays honest.
+    The raster renderer checks that the stored millimetres convert back to
+    exactly these numbers at the sheet's DPI, which is how the millimetre round
+    trip in §1's corollary stays honest.
     """
 
     @property

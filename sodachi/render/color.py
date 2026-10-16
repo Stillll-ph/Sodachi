@@ -133,11 +133,10 @@ def resolve_working_profile(
         first = Path(paths[0])
         data = probe_profile(first)
         if data is None:
-            raise ColorError(
-                f"color.working_profile is 'from_first' but {first.name} has no embedded "
-                f"ICC profile; set color.working_profile to 'srgb' or to the path of an "
-                f".icc file"
-            )
+            # The same fallback to_working applies to an untagged input in any
+            # later position, so the first position is not an error either;
+            # the renderer names every untagged file in its warnings.
+            return SRGB, f"sRGB (libvips built-in; {first.name} has no embedded profile)"
         return data, f"{first.name} (embedded, {len(data)} bytes)"
 
     icc_path = Path(setting)

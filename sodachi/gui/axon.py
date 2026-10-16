@@ -45,10 +45,12 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 from sodachi.core.geometry import Rect
 from sodachi.core.layout import Layout
 from sodachi.core.mat import MatOpeningError, openings_mm, outer_openings_mm
+from sodachi.core.units import NOMINAL_SCREEN_DPI
 # The stack's empty slots must be pixel-for-pixel the flat preview's, or a
 # switch between the two views would read as a content change; importing the
-# helpers keeps one definition of the wash and of colour mixing.
-from sodachi.gui.preview import _mix, _placeholder_gradient
+# helpers keeps one definition of the wash, of colour mixing and of how a
+# callout states a length.
+from sodachi.gui.preview import _mix, _placeholder_gradient, format_length
 from sodachi.gui.theme import PALETTE, draw_dotted_line, draw_micro_label, mono_font
 
 MARGIN_PX = 26.0
@@ -352,12 +354,8 @@ class StackPane(QWidget):
             self.update()
 
     def _fmt(self, mm: float) -> str:
-        if self._units == "in":
-            return f"{mm / 25.4:.2f}"
-        if self._units == "px":
-            dpi = self._layout.sheet.dpi if self._layout else 300.0
-            return f"{round(mm * dpi / 25.4)}"
-        return f"{mm:.1f}"
+        dpi = self._layout.sheet.dpi if self._layout else NOMINAL_SCREEN_DPI
+        return format_length(mm, self._units, dpi)
 
     # ---------------------------------------------------------------- layers
 

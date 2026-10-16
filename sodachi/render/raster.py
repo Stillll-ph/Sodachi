@@ -130,9 +130,36 @@ def render(
     _report(progress, "resolving working profile", 0.10)
     profile, profile_desc = resolve_working_profile(paths, spec)
     bands = working_bands(profile)
+    if spec.color.working_profile == "from_first":
+        # 'from_first' is a promise about the first file, not about the rest:
+        # an untagged input in any position is read as sRGB, which is a guess
+        # the user should hear about whichever position the file is in.
+        for info in infos:
+            if not info.has_profile:
+                warnings.append(
+                    f"{info.path.name} has no embedded ICC profile and is being read "
+                    f"as sRGB"
+                )
 
     sheet_w_px, sheet_h_px = layout.sheet.px_size()
     dpi = layout.sheet.dpi
+
+    if layout.sheet.requested_px is not None:
+        # px_size() hands back requested_px as given, so the canvas cannot
+        # disagree with it; the millimetres can. Converting them back at the
+        # sheet's DPI is the round trip the pixel sheet promises to close.
+        want_px = tuple(layout.sheet.requested_px)
+        got_px = (
+            mm_to_px(layout.sheet.width_mm, dpi),
+            mm_to_px(layout.sheet.height_mm, dpi),
+        )
+        if got_px != want_px:
+            raise RenderError(
+                f"sheet was requested as {want_px[0]}×{want_px[1]}px but its "
+                f"{layout.sheet.width_mm:.4f}×{layout.sheet.height_mm:.4f}mm come back "
+                f"as {got_px[0]}×{got_px[1]}px at {dpi:g} dpi; the millimetre round "
+                f"trip did not close"
+            )
 
     _report(progress, "filling background", 0.16)
     bg_pixel = srgb_hex_to_pixel(
@@ -162,15 +189,6 @@ def render(
         placed = _match_bands(placed, bands, bg_pixel, depth, paths[i])
         canvas = canvas.insert(placed, x0_px, y0_px)
 
-    if layout.sheet.requested_px is not None:
-        want_px = tuple(layout.sheet.requested_px)
-        got_px = (canvas.width, canvas.height)
-        if got_px != want_px:
-            raise RenderError(
-                f"sheet was requested as {want_px[0]}×{want_px[1]}px but composed to "
-                f"{got_px[0]}×{got_px[1]}px; the millimetre round trip did not close"
-            )
-
     final_depth = depth
     if spec.target == "screen":
         _report(progress, "flattening to sRGB", 0.84)
@@ -184,6 +202,22 @@ def render(
         # planner's business, and it is asked rather than applied.
     else:
         out_profile = _resolve_output_profile(spec, profile)
+        if out_profile != profile:
+            # The tag alone is not enough: P3 numbers under an sRGB label are
+            # the one thing worse than an untagged file. The canvas carries no
+            # tag of its own, so the working profile is named as the source.
+            _report(progress, "converting to the output profile", 0.84)
+            try:
+                canvas = canvas.icc_transform(
+                    profile_filename(out_profile),
+                    input_profile=profile_filename(profile),
+                    intent=spec.color.intent,
+                    depth=final_depth,
+                )
+            except vips.Error as exc:
+                raise ColorError(
+                    f"could not convert into the output profile: {exc}"
+                ) from exc
         canvas = attach_profile(canvas, out_profile)
 
     # Resolution is measured off the finished sheet rather than taken from the
@@ -306,12 +340,21 @@ def _composite_depth(spec: "Spec", infos: Sequence[ImageInfo]) -> tuple[int, lis
         depth = 8
 
     if spec.target == "screen" and depth == 16:
-        for info in infos:
-            if info.is_16bit:
-                warnings.append(
-                    f"{info.path.name} is 16-bit but target is 'screen'; the sheet will "
-                    f"be flattened to 8-bit sRGB after compositing"
-                )
+        if requested == 16:
+            # Asked for by the spec rather than inherited from a file, so the
+            # warning names the setting; a per-file one would blame the input,
+            # and with 8-bit inputs there would be no file to blame at all.
+            warnings.append(
+                "output.bit_depth is 16 but target is 'screen'; the sheet will be "
+                "flattened to 8-bit sRGB after compositing"
+            )
+        else:
+            for info in infos:
+                if info.is_16bit:
+                    warnings.append(
+                        f"{info.path.name} is 16-bit but target is 'screen'; the sheet "
+                        f"will be flattened to 8-bit sRGB after compositing"
+                    )
 
     return depth, warnings
 

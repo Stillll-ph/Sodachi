@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from sodachi.core.layout import Layout
 from sodachi.core.mat import MatOpeningError, openings_mm, outer_openings_mm
+from sodachi.core.units import NOMINAL_SCREEN_DPI, mm_to_inch, mm_to_px
 from sodachi.gui.theme import (
     PALETTE,
     draw_dotted_line,
@@ -36,6 +37,21 @@ from sodachi.gui.theme import (
 
 MARGIN_PX = 26.0
 """Room around the sheet for the dimension callouts."""
+
+
+def format_length(mm: float, units: str, dpi: float = NOMINAL_SCREEN_DPI) -> str:
+    """A length for a callout, in the unit the pane speaks.
+
+    Through ``core.units`` rather than its own arithmetic, so the pixel
+    readout rounds the half the way the written file does: a callout one
+    pixel off the export is exactly the seam ``round_half_up`` exists to
+    pin, and ``round`` rounds halves to even.
+    """
+    if units == "in":
+        return f"{mm_to_inch(mm):.2f}"
+    if units == "px":
+        return f"{mm_to_px(mm, dpi)}"
+    return f"{mm:.1f}"
 
 
 def _mix(a: QColor, b: QColor, t: float) -> QColor:
@@ -193,12 +209,8 @@ class PreviewPane(QWidget):
             self.update()
 
     def _fmt(self, mm: float) -> str:
-        if self._units == "in":
-            return f"{mm / 25.4:.2f}"
-        if self._units == "px":
-            dpi = self._layout.sheet.dpi if self._layout else 300.0
-            return f"{round(mm * dpi / 25.4)}"
-        return f"{mm:.1f}"
+        dpi = self._layout.sheet.dpi if self._layout else NOMINAL_SCREEN_DPI
+        return format_length(mm, self._units, dpi)
 
     def layoutResult(self) -> Layout | None:  # noqa: N802 - Qt naming
         return self._layout
@@ -260,7 +272,9 @@ class PreviewPane(QWidget):
         for slot in layout.slots:
             self._paint_slot_label(painter, slot, t)
         self._paint_dimensions(painter, layout, t, sheet)
-        if layout.align == "optical":
+        # Only once there are images to line up: the rail marks ALIGN inert
+        # for a single frame, and an alignment line would contradict it.
+        if layout.align == "optical" and len(layout.slots) > 1:
             self._paint_optical_line(painter, layout, t, sheet)
         if self._warning:
             self._paint_warning(painter)

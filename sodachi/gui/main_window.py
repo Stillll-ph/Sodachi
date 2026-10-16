@@ -129,6 +129,8 @@ PHYSICAL_FIELDS = (
 )
 
 LENGTH_FIELDS = frozenset({"TOP", "SIDES", "BOTTOM", "GUTTER"})
+"""Which of the above are lengths, and so are restated when the unit changes.
+A ratio is the same number in any unit."""
 
 RESOLVING_FIELDS = frozenset({"TOP", "SIDES", "BOTTOM"})
 """The margins the solve can honestly move past their typed value; only
@@ -146,8 +148,6 @@ BOTTOM_MODES = ("fixed", "optical", "center")
 """The bottom margin's three ways of being stated. FIXED leads because the
 neutral spec pins it, and the chip's off-default accent should mark a chosen
 rule, not the opening state."""
-"""Which of the above are lengths, and so are restated when the unit changes.
-A ratio is the same number in any unit."""
 
 INCH_DECIMALS = 2
 """A hundredth of an inch is 0.254mm, which is finer than the millimetre step."""
@@ -256,6 +256,17 @@ CANVAS_CAPTIONS = {
     "fixed": "canvas as typed; the image is scaled to fit",
 }
 
+SCREEN_DEFAULT_BORDER_PX = 150
+"""The border a first SCREEN visit opens with, on every side.
+
+A pixel count rather than the print margins carried over: an inch of paper
+margin is 1080px at the nominal screen DPI, and a canvas that is mostly
+border is not what anyone opened the simple tab for. Fixed rather than
+planned from the file, because the first visit usually happens before any
+file has arrived. 150px is 12.7mm at that DPI, just above the stock 12mm
+gutter, so the derived spec still passes every cross-field rule the print
+spec passed."""
+
 FORMAT_MODES = ("png", "jpg", "tiff")
 """What SCREEN writes. PNG leads: it is lossless, and a bordered image is
 usually headed somewhere that will recompress it anyway, so starting from
@@ -322,6 +333,7 @@ EXPORT_CAPTION = "writes the mat guide, cutter file, or check table"
 # instead of explaining a value that has no effect. One line, like the rest.
 IDLE_CAPTIONS = {
     "MATCH": "idle — nothing to match",
+    "ALIGN": "idle — one image has nothing to line up with",
     "GUTTER": "idle — one image has no gap to keep",
     "RATIO": "idle until BOTTOM mode is OPTICAL",
     "INNER": "idle until DOUBLE is on",
@@ -644,6 +656,12 @@ class CaptionNote(PaddingNote):
     ) -> None:
         super().__init__(text, parent)
         self._indent = float(indent)
+        # A caption explains; it is not a door. The hand and the click are
+        # the padding line's own, because that line opens the fit report.
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        event.ignore()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
         p = QPainter(self)
@@ -712,6 +730,17 @@ class MainWindow(QMainWindow):
         # Guards the exact-canvas derivation against its own spec edit
         # arriving back as a sync and asking it to derive again.
         self._deriving_canvas = False
+        # Set while a whole spec arrives — a tab swap or a file opened. The
+        # engine is the truth then: the list follows its parked sheet rather
+        # than pushing a row from the leaving tab onto the arriving queue,
+        # and the canvas is not rebuilt until the arrival has settled.
+        self._restoring = False
+        # The engine's last complaint, kept only until the event loop turns:
+        # a failed export says why if the reason came in the same breath.
+        self._last_problem: str | None = None
+        self._problem_timer = QTimer(self)
+        self._problem_timer.setSingleShot(True)
+        self._problem_timer.timeout.connect(self._forget_problem)
         # The stock warm-white pair the spec ships with; boards showing it (or
         # the pair a previous palette derived) follow the palette, boards the
         # user has recoloured stay theirs.
@@ -1010,7 +1039,7 @@ class MainWindow(QMainWindow):
         made.clicked.connect(self._remove_selected)
         entries.append((made, "drop the selected image"))
         made = WideButton("Clear all")
-        made.clicked.connect(self.engine.clear)
+        made.clicked.connect(self._clear_queue)
         entries.append((made, "empty the whole queue"))
         made = WideButton("Size…")
         made.clicked.connect(self._choose_size)
@@ -1105,7 +1134,11 @@ class MainWindow(QMainWindow):
             if single
             else MATCH_CAPTIONS.get(spec.layout.size_match, "")
         )
-        self.cap_align.setText(ALIGN_CAPTIONS.get(spec.layout.align, ""))
+        self.cap_align.setText(
+            IDLE_CAPTIONS["ALIGN"]
+            if single
+            else ALIGN_CAPTIONS.get(spec.layout.align, "")
+        )
         self.cap_mat.setText(MAT_CAPTIONS["on" if spec.mat.enabled else "off"])
         self.cap_double.setText(
             IDLE_CAPTIONS["DOUBLE"]
@@ -1356,6 +1389,7 @@ class MainWindow(QMainWindow):
 
     def _apply_pixel_layout(self, name: str) -> None:
         if self.engine.apply_pixel_layout(name):
+            self._settle_canvas_mode()
             self._say(f"layout: {name}")
 
     def _pick_mat_color(self, dotted: str) -> None:
@@ -1570,6 +1604,9 @@ class MainWindow(QMainWindow):
         # its own name — one click, no submenu — rather than riding the
         # export rail it used to sit beneath.
         self.act_requirements = QAction("Configure mat from requirement", self)
+        self.act_requirements.setStatusTip(
+            "Derive paper, margins and mat from the image you want to show."
+        )
         self.act_requirements.triggered.connect(self._print_from_opening)
         self.menuBar().addAction(self.act_requirements)
 
@@ -1663,15 +1700,15 @@ class MainWindow(QMainWindow):
         self.btn_size.clicked.connect(self._choose_size)
         self.btn_add.clicked.connect(self._add_files)
         self.btn_rem.clicked.connect(self._remove_selected)
-        self.btn_clr.clicked.connect(self.engine.clear)
+        self.btn_clr.clicked.connect(self._clear_queue)
         self.padding_note.clicked.connect(self._show_fit)
 
-        self.queue.selectionChanged.connect(self.engine.set_current_row)
+        self.queue.selectionChanged.connect(self._on_queue_row)
         self.queue.rowMoved.connect(self.engine.move)
         self.engine.layoutChanged.connect(self._on_layout)
         self.engine.queueChanged.connect(self._on_queue)
         self.engine.specChanged.connect(self._sync_from_spec)
-        self.engine.problem.connect(self._say)
+        self.engine.problem.connect(self._on_problem)
         self.engine.progress.connect(self._on_progress)
         self.engine.finished.connect(self._on_finished)
         self.engine.busyChanged.connect(self._on_busy)
@@ -1715,11 +1752,6 @@ class MainWindow(QMainWindow):
         margin cleared — align falls to its centred default, and the spec's
         own screen rule centres the bottom.
         """
-        if index == PIXEL_TAB:
-            # The sandwich is a print object; a screen sheet has no boards.
-            self.view_tabs.setCurrentIndex(PLAN_VIEW)
-        self.view_bar.setVisible(index == PHYSICAL_TAB)
-
         target = TAB_TARGETS[index]
         if self.engine.spec.target == target:
             self._sync_from_spec()
@@ -1735,9 +1767,26 @@ class MainWindow(QMainWindow):
             # model says so in a note — but nobody posts one, so the screen
             # spec derives with the format the tab is actually for.
             changes["output.format"] = "png"
-        if not self.engine.set_target(target, changes=changes, clear=clear):
+            # The print margins are an inch of paper, which at the screen
+            # DPI is a thousand-pixel border; the screen spec opens with a
+            # border stated in its own unit. The DPI is set rather than
+            # cleared because the inch sheet comes along until a file
+            # arrives, and the model only forces the screen DPI onto a sheet
+            # stated in pixels.
+            border_mm = px_to_mm(SCREEN_DEFAULT_BORDER_PX, NOMINAL_SCREEN_DPI)
+            changes["margins.top_mm"] = border_mm
+            changes["margins.sides_mm"] = border_mm
+            changes["sheet.dpi"] = NOMINAL_SCREEN_DPI
+        self._restoring = True
+        try:
+            swapped = self.engine.set_target(target, changes=changes, clear=clear)
+        finally:
+            self._restoring = False
+        if not swapped:
             self._sync_from_spec()  # puts the tab back on the target in force
-        elif target == "screen":
+            return
+        self._show_current_job()
+        if target == "screen":
             # The screen spec arrives with the print sheet's size; EXACT
             # rebuilds it around the file the moment the tab opens.
             self._apply_exact_canvas()
@@ -1791,6 +1840,12 @@ class MainWindow(QMainWindow):
         self.tabs.blockSignals(blocked)
         self._stack.setCurrentIndex(tab)
         self._sync_stack_height()
+        # The sandwich is a print object; a screen sheet has no boards. Here
+        # rather than on the tab click, because a spec opened from a file
+        # can change the target without one.
+        if tab == PIXEL_TAB:
+            self.view_tabs.setCurrentIndex(PLAN_VIEW)
+        self.view_bar.setVisible(tab == PHYSICAL_TAB)
         # A mat is print equipment; the group leaves with the PHYSICAL rail
         # rather than sitting disabled under pixel fields it has nothing to say
         # about. Its seam goes with it, and the fields' seam renames to what
@@ -1824,9 +1879,11 @@ class MainWindow(QMainWindow):
         # A TYPE change regroups the queue, and the sheet on screen must
         # follow the row the user selected rather than snapping to whatever
         # lands first — the bug this fixes showed a leading placeholder's
-        # aspect the moment types were cycled over real images.
+        # aspect the moment types were cycled over real images. Not while a
+        # whole spec is arriving: the list still shows the leaving tab's row
+        # then, and the arriving queue has a parked sheet of its own.
         selected = self.queue.currentIndex()
-        if selected >= 0:
+        if selected >= 0 and not self._restoring:
             self.engine.set_current_row(selected)
 
         self._sync_inert(spec)
@@ -1873,6 +1930,9 @@ class MainWindow(QMainWindow):
         beginner = self._scheme == "beginner"
         self.tg_units.setVisible(not on_pixels)
         self.btn_size.setVisible(not on_pixels)
+        # ORIENT is print equipment too: a screen canvas follows its file,
+        # and swapping its sides would quietly undo an exact canvas.
+        self.tg_orient.setVisible(not on_pixels)
         # A placeholder is print design — a frame to cut board around. The
         # screen tab borders files that exist, so the act leaves with the mat.
         self.btn_phantom.setVisible(not on_pixels)
@@ -1922,6 +1982,11 @@ class MainWindow(QMainWindow):
             else None
         )
         self.tg_match.set_inert(multi_reason)
+        self.tg_align.set_inert(
+            "this lines images up with each other; a single frame has nothing to line up with"
+            if single
+            else None
+        )
         gutter_reason = (
             "the gutter separates images; a single frame has no gap to keep"
             if single
@@ -2271,6 +2336,9 @@ class MainWindow(QMainWindow):
             self.act_export_image.setEnabled(not busy)
         self.act_export_image.setStatusTip(image_tip)
         self.act_export_image.setToolTip(image_tip)
+        # The engine refuses a second write while one runs; the button says
+        # so first rather than letting the press land on the refusal.
+        self.btn_export_screen.setEnabled(not busy)
 
         mat_on = self.engine.spec.mat.enabled
         mat_tip = "A printed PDF guide, mirrored for cutting the mat by hand from the back."
@@ -2287,25 +2355,50 @@ class MainWindow(QMainWindow):
         self.act_cut.setToolTip(cut_tip)
 
     def _refresh_padding_note(self) -> None:
-        """Keep the PIXELS rail's one-line padding statement current.
+        """Keep the PIXELS rail's one-line canvas statement current.
 
-        Only computed while the pixel rail is showing: `fit_plan` reads a
-        preset off disk, and a hidden line is refreshed the moment the tab
-        brings it back.
+        The line describes the canvas in force — what the export will write —
+        not the preset plan, which is hypothetical and lives in the Ctrl+F
+        report. Under EXACT that is the file plus its borders; under FIXED
+        the image is scaled into the canvas, and whatever the scaling leaves
+        spare beyond the typed border is said per side.
         """
         if self._stack.currentIndex() != PIXEL_TAB:
             return
         job = self.engine.current_job()
-        if job is None or not job.ready:
-            self.padding_note.setText("padding: add images to measure the fit")
+        layout = self.engine.layout
+        if job is None or not job.ready or layout is None:
+            self.padding_note.setText("canvas: add images to see the fit")
             return
-        result = self.engine.fit_plan()
-        if result is None:
-            self.padding_note.setText("padding: nothing to measure")
-            return
-        plan, _report = result
-        # The first line of the plan's own report is the decision itself.
-        self.padding_note.setText(plan.report().splitlines()[0])
+        spec = self.engine.spec
+        dpi = spec.sheet.dpi
+        width_px, height_px = spec.sheet.to_sheet().px_size()
+        parts = [f"canvas {width_px}×{height_px}px"]
+        if len(layout.slots) == 1:
+            slot = layout.slots[0].rect
+            parts.append(
+                f"{mm_to_px(slot.width_mm, dpi)}×{mm_to_px(slot.height_mm, dpi)} image"
+            )
+        else:
+            parts.append(f"{len(layout.slots)} images")
+        top, sides, bottom = self._border_px()
+        if top == sides == bottom:
+            parts.append(f"border {top}px")
+        else:
+            parts.append(f"borders {top}/{sides}/{bottom}px")
+        solved = (
+            mm_to_px(layout.margins.top_mm, dpi),
+            mm_to_px(layout.margins.left_mm, dpi),
+            mm_to_px(layout.margins.bottom_mm, dpi),
+        )
+        spare = [
+            f"+{got - asked}px {name}"
+            for name, asked, got in zip(("top", "sides", "bottom"), (top, sides, bottom), solved)
+            if got - asked > 0
+        ]
+        if spare:
+            parts.append(", ".join(spare) + " spare")
+        self.padding_note.setText(" · ".join(parts))
 
     def _on_layout(self, layout) -> None:
         self.preview.set_layout_result(layout)
@@ -2336,6 +2429,17 @@ class MainWindow(QMainWindow):
                     else _display_length(value_mm, self._unit_mode),
                     cause,
                 )
+        # A derived bottom is a report of the solve, and the sync that runs
+        # on the spec edit happens before the solve lands — so the row is
+        # restated here, from the layout that just arrived, or it would
+        # always show the previous solve's number.
+        bottom = self._phys_bank.field("BOTTOM")
+        if bottom is not None and bottom.isReadOnly() and layout is not None:
+            shown = _display_length(layout.margins.bottom_mm, self._unit_mode)
+            blocked = bottom.blockSignals(True)
+            _fit_range(bottom, bottom.minimum(), bottom.maximum(), shown)
+            bottom.setValue(shown)
+            bottom.blockSignals(blocked)
         # Every spec edit ends here via resolve, so a live overlap or reveal
         # drag repaints the board overlay in the same breath as the layout —
         # boards in their chosen colours on the plan as well as the sandwich.
@@ -2482,17 +2586,41 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, result) -> None:
         if result is None:
-            self._say("export failed")
+            # The engine says why in the same breath as it says it failed;
+            # the generic line must not paint over the reason.
+            reason = self._last_problem
+            self._say(f"export failed: {reason}" if reason else "export failed")
             return
         path = getattr(result, "path", result)
-        self._say(f"wrote {path}")
+        # The warnings reach the notice line here or nowhere: the engine's
+        # own emits are painted over by this line in the same turn.
+        warnings = tuple(getattr(result, "warnings", ()))
+        if warnings:
+            self._say(f"wrote {path} — " + "; ".join(warnings))
+        else:
+            self._say(f"wrote {path}")
 
     def _on_busy(self, busy: bool) -> None:
         self._sync_export_menu()
 
+    def _on_problem(self, message: str) -> None:
+        self._last_problem = message
+        self._problem_timer.start(0)
+        self._say(message)
+
+    def _forget_problem(self) -> None:
+        self._last_problem = None
+
     def _say(self, message: str) -> None:
+        # One row paints: a spec load's multi-line complaint is folded onto
+        # the line rather than clipped to whichever row happens to show.
+        message = " · ".join(
+            line.strip() for line in str(message).splitlines() if line.strip()
+        )
         self.notice.setText(message)
-        self._notice_timer.start(12000)
+        # Long enough to scroll the whole of a long line past, plus a pause
+        # at the end; a short line gets the plain twelve seconds.
+        self._notice_timer.start(max(12000, self.notice.reveal_ms() + 3000))
 
     # --------------------------------------------------------------- actions
 
@@ -2622,14 +2750,25 @@ class MainWindow(QMainWindow):
         return item
 
     def _border_px(self) -> tuple[int, int, int]:
-        """(top, sides, bottom) as the pixel counts currently on the rail."""
+        """(top, sides, bottom) as the pixel counts the spec asks for.
+
+        A bottom still stated as a rule is restated from the typed top —
+        equal to it under CENTER, TOP × RATIO under OPTICAL — rather than
+        read off the last solve: that solve was for the sheet being
+        replaced, and the slack it centred the image with is not a border
+        anyone asked for.
+        """
         spec = self.engine.spec
         dpi = spec.sheet.dpi
-        return (
-            int(round(mm_to_px(spec.margins.top_mm, dpi))),
-            int(round(mm_to_px(spec.margins.sides_mm, dpi))),
-            int(round(mm_to_px(self._bottom_mm(spec), dpi))),
-        )
+        top = mm_to_px(spec.margins.top_mm, dpi)
+        rule = spec.margins.bottom_mm
+        if rule == "optical":
+            bottom = int(round(top * spec.margins.optical_ratio))
+        elif rule == "center":
+            bottom = top
+        else:
+            bottom = mm_to_px(rule, dpi)
+        return (top, mm_to_px(spec.margins.sides_mm, dpi), bottom)
 
     def _apply_exact_canvas(
         self,
@@ -2649,7 +2788,9 @@ class MainWindow(QMainWindow):
         One edit, not two, because a border set before the canvas grew to
         hold it is a spec that momentarily does not solve.
         """
-        if self._deriving_canvas or self.tg_canvas.value() != "exact":
+        if self._deriving_canvas or self._restoring:
+            return False
+        if self.tg_canvas.value() != "exact":
             return False
         item = self._exact_source()
         if item is None:
@@ -2699,8 +2840,13 @@ class MainWindow(QMainWindow):
             self._apply_exact_canvas()
 
     def _sync_canvas_mode(self) -> None:
-        """WIDTH and HEIGHT report rather than take input while EXACT holds."""
-        exact = self.tg_canvas.value() == "exact"
+        """WIDTH and HEIGHT report rather than take input while EXACT derives.
+
+        Only while it derives: a shared sheet, an empty queue or a file still
+        probing gives the mode nothing to follow, and a canvas nothing is
+        sizing is the user's to type, whatever the chip says.
+        """
+        exact = self.tg_canvas.value() == "exact" and self._exact_source() is not None
         for name in ("WIDTH", "HEIGHT"):
             field = self._pixel_bank.field(name)
             if field is None:
@@ -2788,6 +2934,45 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.engine.remove([row])
 
+    def _clear_queue(self) -> None:
+        """Empty the list, asking first when it is a roll rather than a file.
+
+        One button over from Add placeholder, and a hand-ordered queue has
+        no undo; the engine's own `clear` stays unguarded for programmatic
+        callers.
+        """
+        if len(self.engine.queue) > 1:
+            answer = QMessageBox.question(
+                self,
+                "Clear all",
+                f"Remove all {len(self.engine.queue)} queued files? "
+                "The order they were put in is not kept.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.engine.clear()
+
+    def _on_queue_row(self, row: int) -> None:
+        """The list's selection, pushed to the engine — and, under EXACT,
+        followed by the canvas, because another file is another canvas."""
+        if self._restoring:
+            return
+        before = self.engine.current_job()
+        self.engine.set_current_row(row)
+        after = self.engine.current_job()
+        if after is not None and (before is None or after.index != before.index):
+            self._apply_exact_canvas()
+
+    def _show_current_job(self) -> None:
+        """Point the list at the sheet the engine holds, after a restore."""
+        job = self.engine.current_job()
+        if job is not None:
+            row = self._first_row_of(job)
+            if row is not None:
+                self.queue.setCurrentIndex(row)
+
     def _first_row_of(self, job: Job) -> int | None:
         """The queue row a sheet starts on. None if none of it is still queued."""
         wanted = {id(item) for item in job.items}
@@ -2800,8 +2985,54 @@ class MainWindow(QMainWindow):
 
     def _load_spec(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open spec", "", SPEC_FILTER)
-        if path and self.engine.load_spec_file(path):
+        if path and self._open_spec(path):
             self._say(f"loaded {Path(path).name}")
+
+    def _open_spec(self, path: str | Path) -> bool:
+        """Put a file's design in force, the way a tab click would.
+
+        The load can change target, which swaps the queue, so it is a
+        restore like the tab's: the list follows the engine's sheet once the
+        file is in, and the canvas is settled after, not rebuilt midway.
+        """
+        self._restoring = True
+        try:
+            loaded = self.engine.load_spec_file(path)
+        finally:
+            self._restoring = False
+        if not loaded:
+            return False
+        self._show_current_job()
+        self._settle_canvas_mode()
+        return True
+
+    def _settle_canvas_mode(self) -> None:
+        """A sheet that arrived stated in pixels is a decision, not paper.
+
+        If it is the current file plus its borders, EXACT is what it already
+        says and the derivation merely confirms it. If it is anything else —
+        a 2000×2000 canvas opened over a 1500×1000 file — the chip goes to
+        FIXED, because rewriting the sheet would silently overwrite the one
+        thing the file was opened to state.
+        """
+        spec = self.engine.spec
+        if spec.target != "screen":
+            return
+        item = self._exact_source()
+        if (
+            self.tg_canvas.value() == "exact"
+            and spec.sheet.given_in_px
+            and item is not None
+        ):
+            top, sides, bottom = self._border_px()
+            wanted = (int(item.width_px) + 2 * sides, int(item.height_px) + top + bottom)
+            if (spec.sheet.width_px, spec.sheet.height_px) != wanted:
+                blocked = self.tg_canvas.blockSignals(True)
+                self.tg_canvas.setValue("fixed")
+                self.tg_canvas.blockSignals(blocked)
+                self._sync_canvas_mode()
+                return
+        self._apply_exact_canvas()
 
     def _save_spec(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Save spec", "layout.yaml", SPEC_FILTER)
@@ -2886,7 +3117,38 @@ class MainWindow(QMainWindow):
             self._pick_batch_dir()
             directory = self._batch_dir()
         if directory is not None:
-            self.engine.render_batch_async(directory)
+            # Under EXACT the live spec's canvas is the current file plus its
+            # borders; every other file in the roll needs its own.
+            exact = self.tg_canvas.value() == "exact"
+            self.engine.render_batch_async(
+                directory, spec_for_job=self._exact_spec_for if exact else None
+            )
+
+    def _exact_spec_for(self, job: Job) -> Spec:
+        """One sheet's spec under EXACT: its file plus the borders in force.
+
+        The same arithmetic as `_apply_exact_canvas`, built on a copy rather
+        than applied, because the live spec is the current file's and the
+        batch must not move it. A shared sheet has nothing to derive and
+        takes the live spec as it stands; the engine has already skipped
+        what is unprobed.
+        """
+        if len(job.items) != 1:
+            return self.engine.spec
+        item = job.items[0]
+        if item.phantom or not item.probed or not item.width_px or not item.height_px:
+            return self.engine.spec
+        top, sides, bottom = self._border_px()
+        data = self.engine.spec.model_dump(exclude_none=True)
+        sheet = data["sheet"]
+        for dotted in EXACT_CANVAS_CLEAR:
+            sheet.pop(dotted.split(".", 1)[1], None)
+        sheet["width_px"] = int(item.width_px) + 2 * sides
+        sheet["height_px"] = int(item.height_px) + top + bottom
+        data["margins"]["top_mm"] = px_to_mm(top, NOMINAL_SCREEN_DPI)
+        data["margins"]["sides_mm"] = px_to_mm(sides, NOMINAL_SCREEN_DPI)
+        data["margins"]["bottom_mm"] = px_to_mm(bottom, NOMINAL_SCREEN_DPI)
+        return Spec.model_validate(data)
 
     def _mat(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Mat guide", "mat-guide.pdf", "PDF (*.pdf)")
@@ -2989,6 +3251,12 @@ class MainWindow(QMainWindow):
         if result is None:
             return  # fit_plan has already said why
         _plan, report = result
+        # The plan is what the preset would do, not what the canvas in force
+        # does; the rail's own line states that, and the report says so.
+        report = (
+            "Hypothetical: what the preset plan would make of these images. "
+            "The canvas in force is the one the rail states.\n\n" + report
+        )
         dialog = FitReportDialog(report, parent=self)
         dialog.exec()
         dialog.deleteLater()
@@ -3016,18 +3284,24 @@ class MainWindow(QMainWindow):
             # A typed size beats the list: the fields are the claim.
             width, height = custom
             suffix = "in" if self._unit_mode == "in" else "mm"
+            clear = [
+                "sheet.standard",
+                "sheet.width_mm" if suffix == "in" else "sheet.width_in",
+                "sheet.height_mm" if suffix == "in" else "sheet.height_in",
+                "sheet.width_px",
+                "sheet.height_px",
+            ]
+            # As `apply_standard_size` does: a pixel sheet never chose its
+            # DPI, and carrying the forced screen number onto paper would
+            # quietly print at screen resolution.
+            if self.engine.spec.sheet.given_in_px:
+                clear.append("sheet.dpi")
             self._set_many(
                 {
                     f"sheet.width_{suffix}": width,
                     f"sheet.height_{suffix}": height,
                 },
-                clear=(
-                    "sheet.standard",
-                    "sheet.width_mm" if suffix == "in" else "sheet.width_in",
-                    "sheet.height_mm" if suffix == "in" else "sheet.height_in",
-                    "sheet.width_px",
-                    "sheet.height_px",
-                ),
+                clear=tuple(clear),
             )
             self._say(f"{self.engine.surface_word()}: {width:g} × {height:g} {suffix}")
             return

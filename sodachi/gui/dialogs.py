@@ -35,7 +35,12 @@ from PySide6.QtWidgets import (
 )
 
 from sodachi.core.geometry import Size
-from sodachi.core.mat import MatOpeningError, PrintPlan, print_from_opening
+from sodachi.core.mat import (
+    MatOpeningError,
+    PrintPlan,
+    opening_from_image,
+    print_from_opening,
+)
 from sodachi.core.units import inch_to_mm, mm_to_inch
 from sodachi.gui.theme import (
     PALETTE,
@@ -54,7 +59,10 @@ from sodachi.gui.widgets import (
     WideButton,
 )
 
-UNITS = ("mm", "in")
+# Inches first: the rail's UNITS chip lists them so, and a ToggleChip paints
+# accent for anything but its first entry, so the two must agree on which
+# unit is the plain one.
+UNITS = ("in", "mm")
 """The two ways the check table states a length."""
 
 CUT_FORMATS = ("dxf", "svg", "csv")
@@ -870,14 +878,13 @@ class StandardSizeDialog(_SkinDialog):
         self._units = units
         super().__init__(parent, title="SIZE", window_title="Sodachi — Paper size")
 
-        self.body.addWidget(
-            _Prose(
-                "Pick a named size, or type one. The spec keeps millimetres "
-                "either way; the name is only how it is written down.",
-                size_pt=7.5,
-                role="ink_soft",
-            )
+        self._lead = _Prose(
+            "Pick a named size, or type one. The spec keeps millimetres "
+            "either way; the name is only how it is written down.",
+            size_pt=7.5,
+            role="ink_soft",
         )
+        self.body.addWidget(self._lead)
 
         self._standard = list(sizes)
         self._saved: list[tuple[float, float]] = _load_saved_sizes()
@@ -915,7 +922,7 @@ class StandardSizeDialog(_SkinDialog):
         self.body.addLayout(saved_rail)
 
         self.btn_choose = self.add_button("CHOOSE")
-        self.btn_choose.clicked.connect(self.accept)
+        self.btn_choose.clicked.connect(self._choose)
         self.btn_cancel = self.add_button("CANCEL")
         self.btn_cancel.clicked.connect(self.reject)
 
@@ -925,6 +932,21 @@ class StandardSizeDialog(_SkinDialog):
 
     def _claim_custom(self, _value: float) -> None:
         self._custom_claimed = True
+
+    def _choose(self) -> None:
+        """CHOOSE, unless the typed fields are half a size.
+
+        One filled field claims the choice but cannot answer it, and letting
+        the highlighted row answer instead would hand over a sheet the user
+        never looked at. The lead line says what is missing and the dialog
+        stays open.
+        """
+        if self._custom_claimed:
+            w, h = self.fs_custom_w.value(), self.fs_custom_h.value()
+            if (w > 0) != (h > 0):
+                self._lead.set_text("Type both width and height, or pick a size from the list.")
+                return
+        self.accept()
 
     def _release_custom(self) -> None:
         self._custom_claimed = False
@@ -1085,7 +1107,8 @@ class RequirementsDialog(_SkinDialog):
     you mean to show, at the size you mean to show it. The opening, the paper
     minimum and — when a frame size is given — the margins all follow, live on
     every field commit, via :func:`sodachi.core.mat.print_from_opening` run on
-    the opening the image and reveal imply. An impossible combination puts the
+    the opening :func:`sodachi.core.mat.opening_from_image` derives from the
+    image, the overlap and the reveal. An impossible combination puts the
     error's own text in the results area instead of numbers, because mid-edit
     impossibility is an ordinary state here, not a crash.
 
@@ -1196,19 +1219,26 @@ class RequirementsDialog(_SkinDialog):
             return f"{w_mm / 25.4:.2f} x {h_mm / 25.4:.2f} in"
         return f"{w_mm:.1f} x {h_mm:.1f} mm"
 
+    def _fmt_one(self, value_mm: float) -> str:
+        if self._units == "in":
+            return f"{value_mm / 25.4:.2f} in"
+        return f"{value_mm:.1f} mm"
+
     def _recompute(self) -> None:
         reveal_mm = self._to_mm(self.fs_reveal.value())
+        overlap_mm = self._to_mm(self.fs_overlap.value())
         image = Size(
             self._to_mm(self.fs_image_w.value()), self._to_mm(self.fs_image_h.value())
         )
-        # The image is what was asked for; the opening it implies is the image
-        # grown by the reveal, which is the hole print_from_opening starts at.
-        opening = Size(image.width_mm + 2 * reveal_mm, image.height_mm + 2 * reveal_mm)
         try:
+            # The image is what was asked for; the opening it implies comes
+            # from the one rule the guide and the cut files cut by, so the hole
+            # stated here is the hole they cut after APPLY.
+            opening = opening_from_image(image, overlap_mm=overlap_mm, reveal_mm=reveal_mm)
             plan = print_from_opening(
                 opening,
                 reveal_mm=reveal_mm,
-                overlap_mm=self._to_mm(self.fs_overlap.value()),
+                overlap_mm=overlap_mm,
                 min_border_mm=self._to_mm(self.fs_border.value()),
             )
         except MatOpeningError as exc:
@@ -1247,7 +1277,8 @@ class RequirementsDialog(_SkinDialog):
                 rows.append(
                     (
                         "margins, centred",
-                        f"{self._fmt(side_mm, vert_mm)} (sides, top+bottom)",
+                        f"{self._fmt_one(side_mm)} left and right, "
+                        f"{self._fmt_one(vert_mm)} top and bottom, per side",
                     )
                 )
         width = max(len(label) for label, _value in rows)

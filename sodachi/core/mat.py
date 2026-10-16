@@ -42,6 +42,35 @@ def _mirrored_rect(rect: Rect, sheet_width_mm: float) -> Rect:
     return Rect(sheet_width_mm - rect.right_mm, rect.y_mm, rect.width_mm, rect.height_mm)
 
 
+def _opening_inset_mm(*, overlap_mm: float, reveal_mm: float) -> float:
+    """How far inside the image each opening edge sits, per side.
+
+    The two conventions in the module docstring as one number: positive at
+    reveal zero, where the board closes in by the overlap, negative above it,
+    where the opening grows out by the reveal. :func:`openings_mm` applies it
+    forwards and :func:`print_from_opening` backwards, so the hole a plan
+    states is the hole the guide and the cut file go on to cut.
+    """
+    return -reveal_mm if reveal_mm > 0 else overlap_mm
+
+
+def opening_from_image(image: Size, *, overlap_mm: float, reveal_mm: float = 0.0) -> Size:
+    """The opening an image of this size calls for, by the rule the board is cut with.
+
+    What the Requirements dialog starts from: it holds an image, not a hole,
+    and this is the only way it may turn one into the other.
+    """
+    inset_mm = _opening_inset_mm(overlap_mm=overlap_mm, reveal_mm=reveal_mm)
+    opening = Size(image.width_mm - 2 * inset_mm, image.height_mm - 2 * inset_mm)
+    if opening.width_mm <= 0 or opening.height_mm <= 0:
+        raise MatOpeningError(
+            f"an overlap of {overlap_mm:g}mm takes {2 * overlap_mm:g}mm off each "
+            f"dimension of a {image.width_mm:.2f} × {image.height_mm:.2f} mm image, "
+            f"which closes the window entirely"
+        )
+    return opening
+
+
 def openings_mm(
     layout: Layout,
     *,
@@ -65,12 +94,11 @@ def openings_mm(
     if reveal_mm > 0:
         _check_margins(layout, overlap_mm=overlap_mm, reveal_mm=reveal_mm)
 
+    inset_mm = _opening_inset_mm(overlap_mm=overlap_mm, reveal_mm=reveal_mm)
     out: list[Rect] = []
     for slot in layout.slots:
-        if reveal_mm > 0:
-            opening_mm = slot.rect.inset(-reveal_mm)
-        else:
-            opening_mm = slot.rect.inset(overlap_mm)
+        opening_mm = slot.rect.inset(inset_mm)
+        if reveal_mm <= 0:
             if opening_mm.width_mm <= 0 or opening_mm.height_mm <= 0:
                 raise MatOpeningError(
                     f"mat.window_overlap_mm is {overlap_mm:g}mm, which closes window "
@@ -102,9 +130,9 @@ def outer_openings_mm(
     ``inner_reveal_mm`` on every side, so the returned list lines up
     index-for-index with the bottom board's and the band between the two is
     ``inner_reveal_mm`` wide by construction. Growing pushes the top opening
-    further into the margin than the reveal alone did, so the margin must
-    cover the reveal, the inner reveal and the grip together; and grown
-    openings from adjacent slots need the same overlap's worth of board
+    further towards the margin than the bottom one sits, so the margin must
+    cover whatever the top opening takes past the image plus the grip; and
+    grown openings from adjacent slots need the same overlap's worth of board
     between them that the bottom board's do.
     """
     if inner_reveal_mm <= 0:
@@ -173,7 +201,13 @@ def _check_double_margins(
 ) -> None:
     """The board outside a top-board opening must still be wide enough to grip."""
     narrowest_mm = layout.margins.smallest_mm
-    held_mm = narrowest_mm - reveal_mm - inner_reveal_mm
+    # How far the top opening reaches past the image edge. At reveal zero the
+    # bottom opening sits an overlap inside the image, so the inner reveal
+    # spends that overlap before it touches the margin at all.
+    intrusion_mm = inner_reveal_mm - _opening_inset_mm(
+        overlap_mm=overlap_mm, reveal_mm=reveal_mm
+    )
+    held_mm = narrowest_mm - intrusion_mm
     if held_mm < overlap_mm:
         raise MatOpeningError(
             f"mat.reveal_mm is {reveal_mm:g}mm, mat.inner_reveal_mm is "
@@ -181,7 +215,7 @@ def _check_double_margins(
             f"but the narrowest resolved margin is {narrowest_mm:g}mm; after the "
             f"reveal and the inner reveal that leaves {held_mm:g}mm of board to hold "
             f"the paper, and the grip needs {overlap_mm:g}mm, so every margin must "
-            f"be at least {reveal_mm + inner_reveal_mm + overlap_mm:g}mm"
+            f"be at least {intrusion_mm + overlap_mm:g}mm"
         )
 
 
@@ -318,11 +352,13 @@ def print_from_opening(
 ) -> PrintPlan:
     """Work backwards from a desired opening to the print that fills it.
 
-    With ``inner_reveal_mm`` above zero the plan is for a double mat, and
-    ``opening`` is the top board's — the hole you see. The bottom board's
-    opening is that inset by ``inner_reveal_mm`` on every side, and the image
-    follows from the bottom opening and ``reveal_mm`` exactly as it does for a
-    single mat, since the bottom board is the one facing the print.
+    The image is the bottom opening with :func:`openings_mm`'s rule run in
+    reverse: grown back by the overlap at reveal zero, shrunk by the reveal
+    above it. With ``inner_reveal_mm`` above zero the plan is for a double
+    mat, and ``opening`` is the top board's — the hole you see. The bottom
+    board's opening is that inset by ``inner_reveal_mm`` on every side, and
+    the image follows from the bottom opening exactly as it does for a single
+    mat, since the bottom board is the one facing the print.
 
     The paper is governed by two independent floors and must clear both: the
     user wants at least ``min_border_mm`` of printed border around the image
@@ -334,7 +370,8 @@ def print_from_opening(
     to reach past the bottom board's grip and a top board never enlarges the
     minimum sheet. ``min_paper_mm`` is the per-dimension maximum of the two
     floors; whichever is higher wins, and they cross where ``min_border_mm``
-    equals ``reveal_mm + overlap_mm``.
+    equals ``reveal_mm + overlap_mm``. At reveal zero the grip floor is the
+    image itself, so the border always governs.
     """
     if reveal_mm < 0:
         raise MatOpeningError(f"reveal_mm is {reveal_mm:g}, which is less than zero")
@@ -353,7 +390,8 @@ def print_from_opening(
             f"mm top opening, which leaves no bottom opening at all"
         )
 
-    image = Size(bottom.width_mm - 2 * reveal_mm, bottom.height_mm - 2 * reveal_mm)
+    inset_mm = _opening_inset_mm(overlap_mm=overlap_mm, reveal_mm=reveal_mm)
+    image = Size(bottom.width_mm + 2 * inset_mm, bottom.height_mm + 2 * inset_mm)
     if image.width_mm <= 0 or image.height_mm <= 0:
         raise MatOpeningError(
             f"a reveal of {reveal_mm:g}mm takes {2 * reveal_mm:g}mm off each dimension "
@@ -379,6 +417,7 @@ def print_from_opening(
 __all__ = [
     "MatOpeningError",
     "PrintPlan",
+    "opening_from_image",
     "openings_mm",
     "outer_openings_mm",
     "print_from_opening",

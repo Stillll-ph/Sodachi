@@ -20,11 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 from sodachi.core.geometry import Rect
 from sodachi.core.mat import MatOpeningError, openings_mm, outer_openings_mm
-from sodachi.core.units import mm_to_pt
+from sodachi.core.units import mm_to_pt, pt_to_mm
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sodachi.core.layout import Layout
@@ -228,26 +229,33 @@ def _window_primitives(
 
     # Callouts sit in the overlap band just outside the opening, never inside
     # it, where they would print across the falling waste and confuse the cut.
-    out.extend(
-        [
-            MatPrimitive(
-                kind="text",
-                points_mm=((centre.x_mm, top_mm - _DIM_OFFSET_MM),),
-                text=f"{opening_mm.width_mm:.2f} mm",
-                role=f"dim_width_{number}",
-                size_pt=6.5,
-                align="center",
-            ),
+    out.append(
+        MatPrimitive(
+            kind="text",
+            points_mm=((centre.x_mm, top_mm - _DIM_OFFSET_MM),),
+            text=f"{opening_mm.width_mm:.2f} mm",
+            role=f"dim_width_{number}",
+            size_pt=6.5,
+            align="center",
+        )
+    )
+    # The height label ends at the offset and runs leftwards, so a narrow side
+    # margin can start it off the page. It is dropped rather than moved: the
+    # opening is off limits, the far side has the same clearance by symmetry,
+    # and the header already states every window's size.
+    height_text = f"{opening_mm.height_mm:.2f} mm"
+    height_width_mm = pt_to_mm(pdfmetrics.stringWidth(height_text, "Helvetica", 6.5))
+    if left_mm - _DIM_OFFSET_MM - height_width_mm >= 0:
+        out.append(
             MatPrimitive(
                 kind="text",
                 points_mm=((left_mm - _DIM_OFFSET_MM, centre.y_mm),),
-                text=f"{opening_mm.height_mm:.2f} mm",
+                text=height_text,
                 role=f"dim_height_{number}",
                 size_pt=6.5,
                 align="right",
-            ),
-        ]
-    )
+            )
+        )
 
     # A reveal means the print sits behind a hole larger than the image, and a
     # hand cutter placing the print needs to see where the image lands. The

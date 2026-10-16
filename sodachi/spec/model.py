@@ -227,6 +227,15 @@ class MarginsSpec(BaseModel):
                     f"margins.{mm_name} and margins.{in_name} were both given; "
                     f"a margin takes one or the other"
                 )
+            if isinstance(inches, str) and inches not in ("optical", "center"):
+                # A quoted scalar ("1" for 1, as a hand edit or a quoting YAML
+                # writer leaves it) must still be converted: pydantic would
+                # coerce the string on its own, but only after it had slipped
+                # past this step as millimetres.
+                try:
+                    inches = float(inches)
+                except ValueError:
+                    pass
             if isinstance(inches, bool) or not isinstance(inches, (int, float)):
                 # 'optical' and 'center' are rules, not lengths, so they pass
                 # through untouched and the field's own union rejects the rest.
@@ -367,6 +376,9 @@ class Spec(BaseModel):
     """The unit the window shows. Presentation only; the solver never sees it,
     and every stored length stays a millimetre."""
     placeholders: list[PlaceholderFrame] = Field(default_factory=list)
+    """Frames the design was built around, for a print spec; a screen spec
+    records none and ignores any it carries, since a placeholder is print
+    design and the screen tab borders files that exist."""
     """The frames the design was built around — every save records the
     queue's frames here, real files as their pixel sizes and phantoms as
     stated. On open they materialise as phantoms only when no real images are
@@ -425,19 +437,23 @@ class Spec(BaseModel):
                 named_mm.append(("margins.bottom_mm", self.margins.numeric_bottom_mm))
             name, value_mm = min(named_mm, key=lambda pair: pair[1])
             if self.mat.double:
-                needed_mm = (
+                # How far the top opening reaches past the image edge, as
+                # core/mat.py measures it: at reveal zero the bottom opening
+                # sits an overlap inside the image, so the inner reveal spends
+                # that overlap before it touches the margin at all.
+                intrusion_mm = self.mat.inner_reveal_mm + (
                     self.mat.reveal_mm
-                    + self.mat.inner_reveal_mm
-                    + self.mat.window_overlap_mm
+                    if self.mat.reveal_mm > 0
+                    else -self.mat.window_overlap_mm
                 )
+                needed_mm = intrusion_mm + self.mat.window_overlap_mm
                 if value_mm < needed_mm:
                     raise ValueError(
                         f"mat.reveal_mm is {self.mat.reveal_mm:g}mm, "
                         f"mat.inner_reveal_mm is {self.mat.inner_reveal_mm:g}mm and "
                         f"mat.window_overlap_mm is {self.mat.window_overlap_mm:g}mm, "
                         f"but {name} is only {value_mm:g}mm; the reveal and the inner "
-                        f"reveal leave "
-                        f"{value_mm - self.mat.reveal_mm - self.mat.inner_reveal_mm:g}mm "
+                        f"reveal leave {value_mm - intrusion_mm:g}mm "
                         f"of board to hold the paper, and the grip needs "
                         f"{self.mat.window_overlap_mm:g}mm, so every margin must be at "
                         f"least {needed_mm:g}mm"
@@ -457,7 +473,11 @@ class Spec(BaseModel):
         # The weighted bottom margin assumes a hung object at eye level. A
         # phone in a scrolling feed makes no such assumption.
         if self.target == "screen" and "bottom_mm" not in self.margins.model_fields_set:
-            self.margins.bottom_mm = "center"
+            # A copy, not an assignment through the instance: pydantic stores a
+            # nested model as handed in, so a MarginsSpec shared between a
+            # print spec and a screen spec would otherwise carry the screen
+            # default back into the print one.
+            self.margins = self.margins.model_copy(update={"bottom_mm": "center"})
             self.add_note(
                 "margins.bottom_mm defaulted to 'center' rather than 'optical' because "
                 "target is 'screen'; set it explicitly to override"

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from PySide6.QtCore import QObject, QRunnable, QSettings, QThreadPool, Signal
 
@@ -404,7 +404,12 @@ class SodachiEngine(QObject):
         self._spec_path = Path(path)
         has_real = any(not item.phantom for item in self._queue)
         self._queue = [item for item in self._queue if not item.phantom]
-        if not has_real:
+        if self._spec.target == "screen":
+            # A placeholder is print design; frames a screen file carries —
+            # an older save's, or a hand edit — are dead data and never a
+            # phantom the tab would then refuse to export.
+            pass
+        elif not has_real:
             for frame in self._spec.placeholders:
                 self._queue.append(
                     QueueItem(
@@ -434,17 +439,20 @@ class SodachiEngine(QObject):
         its pixel size — so any spec reopened over an empty queue previews
         the geometry it was actually built around instead of stock stand-ins.
         The paths themselves are not recorded: they are the session's, and a
-        design outlives its files.
+        design outlives its files. Print specs only: a placeholder is print
+        design, and a screen spec records no frames at all.
         """
         from ruamel.yaml import YAML
 
         target = Path(path)
         data = self._spec.model_dump(mode="json", exclude_none=True)
-        frames = [
-            {"width": float(item.width_px), "height": float(item.height_px)}
-            for item in self._queue
-            if item.probed and item.width_px and item.height_px
-        ]
+        frames: list[dict[str, float]] = []
+        if self._spec.target != "screen":
+            frames = [
+                {"width": float(item.width_px), "height": float(item.height_px)}
+                for item in self._queue
+                if item.probed and item.width_px and item.height_px
+            ]
         if frames:
             data["placeholders"] = frames
         else:
@@ -649,7 +657,18 @@ class SodachiEngine(QObject):
         self.resolve()
 
     def _on_probed(self, item: QueueItem, payload: dict[str, Any]) -> None:
-        if item not in self._queue:
+        # Membership by identity, and in the parked lists as well as the live
+        # one: a tab switch while a probe is still decoding parks the item
+        # with its queue, and dropping the result there left the file
+        # unprobed for good. Only the live list repaints and re-solves; a
+        # parked one is restored, result and all, when its tab comes back.
+        live = any(item is queued for queued in self._queue)
+        parked = any(
+            item is queued
+            for queue, _job in self._parked_queues.values()
+            for queued in queue
+        )
+        if not (live or parked):
             return  # removed while its probe was still decoding
         if "error" in payload:
             item.error = payload["error"]
@@ -658,8 +677,9 @@ class SodachiEngine(QObject):
             for key, value in payload.items():
                 setattr(item, key, value)
             item.error = None
-        self.queueChanged.emit()
-        self.resolve()
+        if live:
+            self.queueChanged.emit()
+            self.resolve()
 
     # ----------------------------------------------------------------- solve
 
@@ -841,21 +861,47 @@ class SodachiEngine(QObject):
             return None
         return layout, [], names
 
+    def _exporting(self) -> bool:
+        """Refuse a second write while one is running, and say so.
+
+        Checked at the public entry points rather than in :meth:`_start`,
+        which :meth:`_advance_batch` legitimately calls while busy. Without
+        it a second Export press mid-batch replaced the pending batch and
+        ran two renders at once on a pool shared with the probes.
+        """
+        if self._busy:
+            self.problem.emit("an export is still running; wait for it to finish")
+        return self._busy
+
     def render_async(self, out_path: str | Path) -> bool:
+        if self._exporting():
+            return False
         job = self._ready_job()
         if job is None:
             return False
         self._start(RenderTask("render", self._layout, job.paths, self._spec, Path(out_path)))
         return True
 
-    def render_batch_async(self, out_dir: str | Path) -> bool:
+    def render_batch_async(
+        self,
+        out_dir: str | Path,
+        *,
+        spec_for_job: Callable[[Job], Spec] | None = None,
+    ) -> bool:
         """Write every queued sheet's image into the folder the user picked.
 
         One output per sheet, named for its first file, collisions numbered.
         Sheets still probing or holding a phantom are skipped and counted
         aloud rather than blocking the rest: one stray placeholder should not
         hold the other thirty-seven hostage.
+
+        ``spec_for_job`` returns the spec one sheet is solved and rendered
+        with; without it every sheet takes the live spec. The window passes
+        it under an EXACT canvas, where the live spec's sheet is the current
+        file plus its borders and every other file needs its own.
         """
+        if self._exporting():
+            return False
         directory = Path(out_dir)
         if not directory.is_dir():
             self.problem.emit(f"not a folder: {directory}")
@@ -865,7 +911,6 @@ class SodachiEngine(QObject):
             self.problem.emit("add some images first")
             return False
 
-        suffix = OUTPUT_SUFFIX[self._spec.output.format]
         tasks: list[RenderTask] = []
         skipped = 0
         used: set[Path] = set()
@@ -873,9 +918,10 @@ class SodachiEngine(QObject):
             if not job.ready or any(item.phantom for item in job.items):
                 skipped += 1
                 continue
+            spec = self._spec if spec_for_job is None else spec_for_job(job)
             try:
                 layout = solve(
-                    self._spec,
+                    spec,
                     job.aspects(),
                     names=job.names,
                     natural_widths=job.natural_widths(),
@@ -885,6 +931,7 @@ class SodachiEngine(QObject):
                 self.problem.emit(str(exc))
                 skipped += 1
                 continue
+            suffix = OUTPUT_SUFFIX[spec.output.format]
             stem = job.items[0].path.stem
             out = directory / f"{stem}{suffix}"
             counter = 2
@@ -892,7 +939,7 @@ class SodachiEngine(QObject):
                 out = directory / f"{stem}-{counter}{suffix}"
                 counter += 1
             used.add(out)
-            tasks.append(RenderTask("render", layout, job.paths, self._spec, out))
+            tasks.append(RenderTask("render", layout, job.paths, spec, out))
 
         if skipped:
             self.problem.emit(
@@ -907,6 +954,8 @@ class SodachiEngine(QObject):
         return True
 
     def mat_async(self, out_path: str | Path) -> bool:
+        if self._exporting():
+            return False
         # Checked before the queue, because a spec with mats switched off is
         # the more specific complaint and has to be fixed either way.
         if not self._spec.mat.enabled:
@@ -944,6 +993,8 @@ class SodachiEngine(QObject):
         parameter stays for the rare cutter that genuinely asks for back-side
         coordinates, and it has to be asked for by name.
         """
+        if self._exporting():
+            return False
         out = Path(out_path)
         suffix = out.suffix.lower()
         if suffix not in CUT_FORMATS:

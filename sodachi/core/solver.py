@@ -216,6 +216,18 @@ def solve(
     scale = min(scale_w, scale_h)
 
     if scale <= 0:
+        if avail_w_mm <= 0 or avail_h_mm <= 0:
+            # A derived bottom is only known here, so a top margin the spec
+            # model could not refuse can still swallow the sheet. No gutter is
+            # to blame for a box with no height, so name the margins instead.
+            bottom_word = "derived bottom" if isinstance(bottom_rule, str) else "bottom"
+            raise LayoutError(
+                f"the content does not fit after margins: margins.top_mm is "
+                f"{top_mm:g}mm and the {bottom_word} is {provisional_bottom_mm:.2f}mm "
+                f"on a sheet {sheet.height_mm:g}mm tall, margins.sides_mm is "
+                f"{sides_mm:g}mm on a sheet {sheet.width_mm:g}mm wide, so the "
+                f"available box is {avail_w_mm:.2f} × {avail_h_mm:.2f} mm"
+            )
         widest_row = max(len(indexes) for indexes in rows_of_indexes)
         raise LayoutError(
             f"the content does not fit after margins: the available box is "
